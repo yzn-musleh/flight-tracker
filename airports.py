@@ -1,27 +1,22 @@
-"""Resolves an airport IATA code to a country name, with local caching.
+"""Resolves an airport IATA code to a country name, with caching in SQLite.
 
 Caching matters because Aviationstack's free tier only allows 100
-requests/month — once an airport (e.g. AMM) has been resolved once, it's
+requests/month -- once an airport (e.g. AMM) has been resolved once, it's
 never looked up again.
 """
-import json
+
 import os
+
 import requests
 
-CACHE_FILE = "airport_countries.json"
+import storage
+
 AIRPORTS_URL = "https://api.aviationstack.com/v1/airports"
 
-
-def _load_cache() -> dict:
-    if not os.path.exists(CACHE_FILE):
-        return {}
-    with open(CACHE_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def _save_cache(cache: dict) -> None:
-    with open(CACHE_FILE, "w", encoding="utf-8") as f:
-        json.dump(cache, f, indent=2)
+# Unused since Phase 1 moved the cache into SQLite (storage.airports table).
+# Kept only so tests written against the old JSON-cache file path don't error
+# on setup; removed entirely once Phase 2 deletes the live airport lookup.
+CACHE_FILE = "airport_countries.json"
 
 
 def get_country(iata_code: str) -> str:
@@ -30,9 +25,9 @@ def get_country(iata_code: str) -> str:
         return "Unknown"
     iata_code = iata_code.upper()
 
-    cache = _load_cache()
-    if iata_code in cache:
-        return cache[iata_code]
+    cached = storage.get_airport_country(iata_code)
+    if cached is not None:
+        return cached
 
     api_key = os.environ.get("AVIATIONSTACK_API_KEY")
     if not api_key:
@@ -41,7 +36,9 @@ def get_country(iata_code: str) -> str:
     country = "Unknown"
     try:
         resp = requests.get(
-            AIRPORTS_URL, params={"access_key": api_key, "iata_code": iata_code}, timeout=15
+            AIRPORTS_URL,
+            params={"access_key": api_key, "iata_code": iata_code},
+            timeout=15,
         )
         resp.raise_for_status()
         payload = resp.json()
@@ -49,10 +46,9 @@ def get_country(iata_code: str) -> str:
         if data:
             country = data[0].get("country_name") or "Unknown"
     except Exception:
-        # Network hiccup or quota exhausted — leave as Unknown, we'll retry next check.
+        # Network hiccup or quota exhausted -- leave as Unknown, we'll retry next check.
         return "Unknown"
 
     if country != "Unknown":
-        cache[iata_code] = country
-        _save_cache(cache)
+        storage.save_airport_country(iata_code, country)
     return country
