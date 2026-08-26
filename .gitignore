@@ -1,5 +1,9 @@
 .env
 *.json
+*.json.imported
+*.db
+*.db-wal
+*.db-shm
 .claude/settings.local.json
 .venv/
 __pycache__/
