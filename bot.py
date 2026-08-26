@@ -11,6 +11,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 
 import airports
 import flight_api
+import providers
 import scheduler
 import storage
 import storage.importer
@@ -24,6 +25,7 @@ SCHEDULER_TICK_MINUTES = int(os.environ.get("SCHEDULER_TICK_MINUTES", "15"))
 MONTHLY_REQUEST_CAP = int(os.environ.get("MONTHLY_REQUEST_CAP", "100"))
 REQUEST_SAFETY_MARGIN = int(os.environ.get("REQUEST_SAFETY_MARGIN", "5"))
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")  # where alerts get pushed
+provider = providers.get_provider()
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -96,8 +98,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     date = tracked["date"] if tracked else None
     name = tracked["name"] if tracked else flight_iata
     try:
-        flight = flight_api.get_flight_status(flight_iata, date)
-        summary = flight_api.summarize(flight)
+        summary = provider.get_flight(flight_iata, date)
         await update.message.reply_text(
             flight_api.format_message(name, flight_iata, summary)
         )
@@ -137,8 +138,7 @@ async def add_flight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     flight_iata = flight_iata.upper()
     dep_country = arr_country = "Unknown"
     try:
-        flight = flight_api.get_flight_status(flight_iata, date)
-        summary = flight_api.summarize(flight)
+        summary = provider.get_flight(flight_iata, date)
         dep_country = airports.get_country(summary.get("dep_iata"))
         arr_country = airports.get_country(summary.get("arr_iata"))
     except flight_api.FlightLookupError:
@@ -195,8 +195,7 @@ async def check_all_flights(context: ContextTypes.DEFAULT_TYPE) -> None:
             continue
 
         try:
-            flight = flight_api.get_flight_status(flight_iata, f.get("date"))
-            summary = flight_api.summarize(flight)
+            summary = provider.get_flight(flight_iata, f.get("date"))
         except flight_api.BudgetExhaustedError as e:
             log.warning(
                 "Monthly budget exhausted mid-run, stopping periodic checks: %s", e
