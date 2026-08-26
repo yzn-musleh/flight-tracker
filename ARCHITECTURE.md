@@ -31,6 +31,18 @@ still going, and `CHANGELOG.md`/`PROGRESS.md` for the phase-by-phase history.
   it's no longer needed. See `docs/providers.md` for the researched
   comparison of alternative providers and a recommendation — Aviationstack
   remains the default in code per this phase's explicit scope.
+- **Phase 3**: rewrote change detection (`change_detection.py`, new) to
+  enforce the null-transition guard and the cancelled/diverted/landed status
+  whitelist, fixing the bug documented in `FINDINGS.md` #5. Alerts are now
+  deduped and crash-safe via `change_events` (migration version 3 adds a
+  `sent` column): every detected change is durably recorded before any send
+  is attempted, and an unconfirmed (`sent=0`) row from an interrupted send is
+  retried on the next poll rather than lost or endlessly re-detected. Field
+  changes within one poll are bundled into a single message. Added
+  `timezones.py` for dual-timezone rendering (airport-local +
+  `SUBSCRIBER_TIMEZONE`, a global stand-in for the per-chat setting Phase 4
+  is expected to add) in both the alert text and `/status`'s
+  `flight_api.format_message()`.
 
 ## Modules
 
@@ -94,13 +106,11 @@ directly, so `bot.py`/`flight_api.py`/`airports.py` call e.g.
   detection (`status, dep_delay, arr_delay, dep_gate, arr_gate, dep_estimated,
   arr_estimated`) and a `has_snapshot` flag distinguishing "never checked" from
   "checked and every field happened to be null".
-- **`change_events`**: append-only audit log of detected field changes
-  (`flight_iata, scheduled_date, field, old_value, new_value, detected_at`).
-  Added in Phase 1's schema but **not yet written to or read by any code
-  path** — it exists so Phase 3's dedupe/debounce rewrite has somewhere to
-  record history without a second migration. Today's alert logic is otherwise
-  unchanged (see "Exact conditions under which an alert fires" below, which
-  still describes the live behavior).
+- **`change_events`**: durable dedupe/retry record for alerts, plus an
+  incidental audit trail (`flight_iata, scheduled_date, field, old_value,
+  new_value, detected_at, sent`). Added empty in Phase 1's schema; Phase 3
+  is the code that actually writes and reads it — see "Crash-safe dedupe
+  and retry" below.
 - **`api_usage`**: append-only request log (`provider, timestamp, endpoint,
   http_status, counted`), matching `CLAUDE.md`'s target schema exactly.
   Replaces the old mutable `usage.json` counter. `load_usage()`'s `count` is
@@ -241,7 +251,7 @@ IATA-code-to-country-name cache, e.g. `{"AMM": "Jordan"}`. Only successful
 lookups (`country != "Unknown"`) are cached; unresolved codes are retried on
 every call.
 
-## Exact conditions under which an alert fires
+## Exact conditions under which an alert fires (Phase 3+, current)
 
 An alert is sent from `check_all_flights` if and only if **all** of:
 
@@ -249,31 +259,68 @@ An alert is sent from `check_all_flights` if and only if **all** of:
    (`storage.usage_remaining(MONTHLY_REQUEST_CAP) > REQUEST_SAFETY_MARGIN`).
 2. `scheduler.is_due(flight, schedule_entry, now)` is `True` for this flight
    (see scheduler rules below).
-3. `flight_api.get_flight_status()` succeeds (no `BudgetExhaustedError`,
-   no `FlightLookupError`).
-4. The extracted key-fields dict —
-   `{status, dep_delay, arr_delay, dep_gate, arr_gate, dep_estimated, arr_estimated}`
-   — is **not equal** (plain dict `!=`) to the dict stored in `state.json` for
-   that `flight_iata`.
-5. There **was** a previous entry in `state.json` for that `flight_iata` (i.e.
-   this is not the first successful lookup ever recorded for it — the first one
-   only writes a silent baseline).
+3. `provider.get_flight()` succeeds (no `BudgetExhaustedError`, no
+   `FlightLookupError`).
+4. This is not the very first successful lookup ever recorded for this
+   `(flight_iata, date)` (`storage.get_flight_state(...)` is not `None`) —
+   that case only writes a silent baseline, same as before Phase 3.
+5. `change_detection.detect_changes(previous, current)` returns at least one
+   `FieldChange` for at least one of `{status, dep_delay, arr_delay, dep_gate,
+   arr_gate, dep_estimated, arr_estimated}` — see the rules below — **or**
+   there's a leftover unsent row in `change_events` from a previous poll that
+   crashed before its send completed (see "Crash-safe dedupe and retry"
+   below). Either way, `storage.get_pending_changes()` returning a non-empty
+   list is what actually triggers the send.
 
-Notably, condition 4 is a raw dict comparison with **no null-transition
-guard**: a field going from a real value to `None` (e.g. Aviationstack briefly
-omitting `dep_gate`) counts as a change and fires an alert. There is also no
-per-field dedupe key and no debounce — every tick that produces *any* differing
-field sends exactly one message bundling the whole current summary, and if two
-ticks in a row each change a different field, that's two separate messages. This
-is intentional-today, not yet what `CLAUDE.md`'s invariants (2) and dedupe-by
-`(flight_key, field, new_value)` require — that's Phase 3 work.
+`change_detection.detect_changes()`'s per-field rule (`change_detection.py`,
+CLAUDE.md invariant #2): a field only counts as alert-worthy if it goes from
+a non-null value to a *different* non-null value, **or** — the one explicit
+exception — the `status` field's new value is in
+`change_detection.ALWAYS_ALERT_STATUSES` (`cancelled`, `diverted`, `landed`),
+in which case it alerts even coming from `None` (a flight whose very first
+successful check already shows it cancelled must still say so). A value
+going non-null → `None`, or `None` → an ordinary (non-terminal) value, is
+*not* alert-worthy either way — this is the null-transition bug from the
+pre-Phase-3 baseline, now fixed (see `FINDINGS.md` #5). One consequence
+worth knowing: a gate being assigned for the first time (`None` → `"12"`)
+does **not** alert under this rule, by the same invariant that excludes a
+gate disappearing.
 
-Also notable: state is persisted (`storage.save_state`) **before** the Telegram
-send is attempted, so if `send_message` raises, the change is not retried on the
-next tick (it's already "the known state"). This matches the *spirit* of
-invariant (1) — never replay — but only at the granularity of "whole flight
-snapshot", not per-field, and there is no reconciliation step if the send
-actually failed.
+All changes detected across all fields in one poll are bundled into a single
+message (`change_detection.format_alert_message`) rather than one message
+per field — this is the "rapid successive changes... debounced into one
+message" requirement, implemented as "everything detected in one poll (plus
+anything still pending from before) is one send", which is exact and
+sufficient given `SCHEDULER_TICK_MINUTES`/`CHECK_INTERVAL_MINUTES` are
+always far more than 60 seconds apart in practice — see `PROGRESS.md`'s
+Phase 3 entry for why a true wall-clock debounce timer wasn't built.
+Cancelled/diverted/landed get a distinct headline instead of the generic
+"🔔 Update" framing (CLAUDE.md: terminal states get their own copy).
+
+## Crash-safe dedupe and retry (`change_events` table)
+
+Before any send is attempted, every detected `FieldChange` is written to
+`change_events` with `sent=0` (`storage.record_pending_change`), keyed by
+`(flight_iata, scheduled_date, field, new_value)` — CLAUDE.md invariant #1's
+literal dedupe key. `storage.get_flight_state`'s snapshot is updated
+immediately after, independent of whether the send below succeeds. Then:
+
+- All currently-`sent=0` rows for this flight (not just ones from this poll)
+  are fetched and sent as one message.
+- On success, they're marked `sent=1` (`storage.mark_changes_sent`) —
+  confirmed delivered, never resent.
+- If the send raises (network failure, or the process crashes/restarts
+  entirely before this line runs), the rows stay `sent=0`. Because the
+  snapshot was already updated to the new values, a plain re-diff on the
+  next poll would find *no new change* — the pending-changes check runs
+  **unconditionally**, not only when something new changed, specifically so
+  this leftover row still gets retried. See
+  `tests/test_alert_persistence.py::test_crash_before_send_completes_is_retried_next_poll_not_lost_or_duplicated`
+  for this exact sequence exercised end-to-end.
+
+This is the "recorded as sent before the send is attempted, with
+reconciliation after" invariant, implemented without a separate background
+retry job — reconciliation piggybacks on the next regular poll.
 
 ## Scheduler rules (`scheduler.py`)
 
@@ -347,11 +394,21 @@ actually failed.
 - No `chat_id` scoping anywhere — every file is implicitly global to the single
   `TELEGRAM_CHAT_ID` operator. Any chat that can reach the bot can `/add`,
   `/remove`, and read every tracked flight.
-- No null-transition guard on alerts (see above).
-- No per-field dedupe key, no debounce window.
-- Timestamps are stored as whatever Aviationstack returns (ISO 8601 with
-  offset, effectively UTC) but never explicitly normalized or rendered in a
-  chosen timezone — display is just the raw ISO string.
+- ~~No null-transition guard on alerts~~ **Fixed in Phase 3**:
+  `change_detection.detect_changes()` enforces it, plus the
+  cancelled/diverted/landed status whitelist.
+- ~~No per-field dedupe key, no debounce window~~ **Fixed in Phase 3**:
+  deduped by `(flight_iata, scheduled_date, field, new_value)` via
+  `change_events`, crash-safe (see "Crash-safe dedupe and retry"); changes
+  within one poll are bundled into one message.
+- ~~Timestamps are... never explicitly normalized or rendered in a chosen
+  timezone~~ **Partially fixed in Phase 3**: `timezones.py` renders stored
+  UTC timestamps in the airport's local timezone and a subscriber timezone,
+  in both the alert text and `/status`. Storage/comparison were always UTC
+  already (Aviationstack returns offset-aware ISO 8601). Still a gap: the
+  subscriber timezone is one global `SUBSCRIBER_TIMEZONE` env var, not a
+  per-chat setting — that needs Phase 4's chat_id-scoped subscriptions and a
+  `/timezone` command to do properly.
 - ~~Airport country resolution is a live, uncached-until-hit API call sharing
   no budget accounting with the main quota~~ **Fixed in Phase 2**: resolved
   from a bundled offline dataset, zero network calls, zero quota impact.

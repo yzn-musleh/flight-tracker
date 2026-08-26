@@ -87,8 +87,13 @@ requests in reserve — periodic checks pause automatically as the cap
 approaches so a manual `/status` during your actual trip never gets refused.
 Check `/budget` any time to see usage.
 
-The first check for a flight just records a baseline silently; after that,
-any change (status, delay, gate) triggers a message to your chat.
+The first check for a flight just records a baseline silently. After that, a
+real change to status, delay, gate, or estimated time triggers a message —
+but a field going from a known value to unknown (a provider blip) never
+does, and a field going from unknown to known only does for status changes
+to cancelled/diverted/landed (those always alert, even with no prior status
+on record). Times are shown in both the airport's local timezone and
+`SUBSCRIBER_TIMEZONE` (default UTC).
 
 ## Notes
 

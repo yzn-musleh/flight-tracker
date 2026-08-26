@@ -5,6 +5,37 @@ All notable changes to this project are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Phase 3 — Correctness of alerts
+- Added `change_detection.py`: pure, exhaustively-tested rules for which
+  field changes are alert-worthy. Fixes the null-transition bug from the
+  pre-hardening baseline (a field going non-null → null no longer fires an
+  alert; see `FINDINGS.md` #5) and adds the explicit
+  cancelled/diverted/landed status whitelist (alerts even from an unknown
+  prior status).
+- Alerts are now durably deduped and crash-safe: `change_events` (migration
+  version 3 adds a `sent` column) records every alert-worthy change *before*
+  any send is attempted, keyed by `(flight_iata, scheduled_date, field,
+  new_value)`. An interrupted send (crash, network failure) leaves the row
+  unconfirmed and it's retried on the next poll — not lost, not resent once
+  confirmed. See `tests/test_alert_persistence.py` for a full
+  crash-and-restart simulation.
+- Multiple field changes detected in one poll (plus anything still pending
+  from an earlier interrupted send) are bundled into a single message
+  instead of one per field.
+- Cancelled/diverted/landed get a distinct message headline instead of the
+  generic "🔔 Update" framing.
+- Added `timezones.py`: renders stored UTC timestamps in both the relevant
+  airport's local timezone (from Phase 2's bundled dataset) and a
+  subscriber timezone (`SUBSCRIBER_TIMEZONE` env var, default UTC — a
+  global stand-in for the per-chat setting Phase 4 is expected to add).
+  Wired into both the new alert messages and `/status`'s
+  `flight_api.format_message()`.
+- One Phase 0 test (`test_bot_alerts.py::test_alert_fires_on_value_to_null_transition`)
+  characterized the null-transition bug and explicitly anticipated this fix
+  in its own docstring; left failing and marked `xfail` per `CLAUDE.md`'s
+  rule against editing a Phase 0 test regardless — see `FINDINGS.md` #5.
+- No new runtime dependencies (`zoneinfo` is stdlib since Python 3.9).
+
 ### Phase 2 — Provider abstraction + offline airport data
 - Added a `providers/` package: `FlightProvider` Protocol, `QuotaPolicy`,
   `FlightSnapshot` (`providers/base.py`); `AviationstackProvider`, a thin

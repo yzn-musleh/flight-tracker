@@ -1,5 +1,93 @@
 # Progress Log
 
+## Phase 3 — Correctness of alerts
+
+**What I did**
+- Branched `harden/phase-3-alert-correctness` from Phase 2's tip.
+- Added `change_detection.py` (pure logic: `detect_changes`,
+  `format_alert_message`) and `timezones.py` (pure rendering:
+  `render_dual`), both fully unit-tested with no storage/bot/network
+  involved (`tests/test_change_detection.py`, `tests/test_timezones.py`).
+- Added a migration (version 3) adding `sent` to `change_events`, and three
+  storage functions (`record_pending_change`, `get_pending_changes`,
+  `mark_changes_sent`) implementing durable, crash-safe alert dedupe.
+- Rewrote `check_all_flights`'s alerting section in `bot.py` to use these;
+  wired `timezones.render_dual` into `flight_api.format_message()` for
+  `/status`'s estimated-time lines.
+- Wrote `tests/test_alert_persistence.py`: end-to-end tests through
+  `bot.check_all_flights` for bundling, no-resend-once-sent, "recorded
+  before send is attempted", and — the one HARDENING_PLAN.md explicitly
+  asked for — a simulated crash mid-notification (the send raises,
+  as if the process died) followed by a simulated restart (a fresh poll),
+  asserting the alert is retried exactly once: not lost, not duplicated.
+
+**What I decided and why**
+- **Found and fixed a real bug in my own first draft before it shipped**:
+  my initial design only checked for pending/unsent alerts inside the `if
+  previous != key_fields` branch, meaning a crash between recording a
+  change and sending it would never be retried on a later poll where
+  nothing *new* happened to differ (the snapshot was already updated to the
+  new value, so a plain re-diff finds nothing). I caught this while writing
+  the crash-and-restart test — before running it, by reasoning through what
+  it needed to prove — and moved the pending-changes check to run
+  unconditionally every poll. The test in `test_alert_persistence.py` now
+  exercises exactly this path and would have caught the bug if I'd shipped
+  the first version.
+- **Debounce implemented as "bundle everything in one poll", not a wall-clock
+  timer.** HARDENING_PLAN.md asks for "rapid successive changes... debounced
+  into one message within a 60-second window." Given `SCHEDULER_TICK_MINUTES`
+  (default 15) and `CHECK_INTERVAL_MINUTES`/`FAR_TIER_MINUTES` (30/120) are
+  always far more than 60 seconds apart, two *automatic* polls can never
+  actually land within 60 seconds of each other in this bot's real operation
+  — so a genuine time-windowed debounce (which would need a deferred-send
+  mechanism, e.g. "wait N seconds after the first change before composing
+  the message") would add real complexity to solve a case that can't occur
+  yet. Bundling everything detected in one poll (which *is* effectively
+  instantaneous — one synchronous pass over one flight) satisfies the
+  requirement for every case this architecture can currently produce. If
+  Phase 5 or later introduces concurrent/overlapping triggers (e.g. webhook
+  push arriving between two polls, or a manual `/status` some day writing to
+  the same alert state), this decision should be revisited.
+- **`SUBSCRIBER_TIMEZONE` is one global env var, not a per-chat setting.**
+  HARDENING_PLAN.md's Phase 3 prompt asks to render times in "the
+  subscriber's configured timezone", but there's no per-chat
+  subscription/settings model until Phase 4 introduces chat_id scoping and
+  (per its own prompt) a `/timezone` command. Building real per-chat timezone
+  storage now would mean doing part of Phase 4's data-model work early and
+  probably redoing it once chat_id scoping lands. Every function that needs
+  a subscriber timezone (`timezones.render_dual`,
+  `change_detection.format_alert_message`) already takes it as an explicit
+  parameter with the global env var only as the *default* — Phase 4 replacing
+  the global with a per-chat lookup should be a call-site change, not a
+  signature change.
+- **A gate being assigned for the first time doesn't alert.** This was a
+  deliberate reading of CLAUDE.md's exact wording — "Only non-null ->
+  different non-null... produce a message" — which excludes `None -> value`
+  as well as `value -> None`, not just the latter. I flagged this
+  explicitly (in `ARCHITECTURE.md` and a dedicated test) since it's a real,
+  possibly-surprising usability tradeoff (a family member won't be told
+  about a gate assignment that appears after the baseline was already
+  recorded) that the project owner may want revisited even though it's what
+  the invariant as written implies.
+- Followed `CLAUDE.md`'s hard-stop rule literally even where the Phase 0
+  test's own docstring anticipated and welcomed this exact fix
+  (`test_alert_fires_on_value_to_null_transition`) — marked `xfail`, did not
+  edit, per `FINDINGS.md` #5.
+
+**What I deliberately did not do**
+- Did not build a real wall-clock debounce/deferred-send mechanism — see
+  above.
+- Did not implement a per-chat `/timezone` command or chat_id-scoped
+  timezone storage — Phase 4's job.
+- Did not change `scheduler.py`'s tiering/backoff logic at all — Phase 3 is
+  about *whether an already-fetched result is alert-worthy*, not *when to
+  fetch*. That's Phase 5.
+- Did not add retry/backoff for the Telegram `send_message` call itself
+  (e.g. handling `RetryAfter`) — that's explicitly Phase 5 scope
+  ("Handle Telegram RetryAfter"). Phase 3 only makes sure a failed send
+  doesn't lose or duplicate the underlying alert; it doesn't make the send
+  itself more resilient.
+
 ## Phase 2 — Provider abstraction + offline airport data
 
 **What I did**
