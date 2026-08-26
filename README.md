@@ -92,8 +92,12 @@ any change (status, delay, gate) triggers a message to your chat.
 
 ## Notes
 
-- `flights.json`, `state.json`, `schedule.json`, `usage.json`, and
-  `airport_countries.json` are created/updated automatically — no need to
-  edit them by hand.
+- All state lives in a single SQLite database file, `flights.db` (created
+  automatically next to the bot — configurable via the `DB_PATH` env var), no
+  need to edit it by hand. If you're upgrading from an older version that used
+  `flights.json`/`state.json`/`schedule.json`/`usage.json`/
+  `airport_countries.json`, the bot imports them into `flights.db`
+  automatically the first time it starts and renames each one to
+  `*.json.imported` once done.
 - If you outgrow Aviationstack's free tier, `flight_api.py` is a single small
   module — swap in another provider (e.g. AeroDataBox) without touching the bot logic.

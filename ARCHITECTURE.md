@@ -1,9 +1,23 @@
-# ARCHITECTURE.md — as of Phase 0 (pre-hardening baseline)
+# ARCHITECTURE.md
 
-This describes what the code in this repo actually does today, warts included. It
-is a characterization document, not a design spec — see `HARDENING_PLAN.md` and
-`CLAUDE.md` for where this is going. Nothing here has been changed by Phase 0;
-this file and `tests/` are the only additions.
+Describes what the code in this repo actually does, kept up to date at the end of
+each hardening phase. Originally written in Phase 0 as a pure characterization of
+the pre-hardening baseline (warts included); updated in Phase 1 to reflect the
+SQLite storage rewrite. See `HARDENING_PLAN.md` and `CLAUDE.md` for where this is
+still going, and `CHANGELOG.md`/`PROGRESS.md` for the phase-by-phase history.
+
+## Update history
+
+- **Phase 1**: storage moved from five flat JSON files to a single SQLite
+  database (`flights.db`, WAL mode) behind a repository-style facade in the
+  `storage/` package. Flights are now keyed by `(flight_iata, scheduled_date)`
+  instead of `flight_iata` alone, closing the two-people-same-flight-number
+  collision gap called out below. `airports.py`'s cache moved from its own
+  JSON file into the same database. A one-shot importer
+  (`storage/importer.py`) migrates any pre-existing JSON files on first run
+  and renames them to `*.json.imported`. The sections below describing JSON
+  file schemas are Phase-0-era history, kept for context; see "Storage:
+  SQLite schema (Phase 1+)" for the current shape.
 
 ## Modules
 
@@ -47,12 +61,75 @@ directly, independent of `flight_api.py`).
    `/budget`, `/start`) read/write the same JSON files directly; none of them
    go through the scheduler.
 
-## Storage: JSON file schemas
+## Storage: SQLite schema (Phase 1+, current)
 
-All files live in the working directory the bot is launched from and are created
-on first write. There is no locking beyond an in-process `threading.Lock` (no
+One file, `flights.db` (path configurable via `DB_PATH`), opened in WAL mode.
+Schema is applied via versioned migrations in `storage/migrations.py`
+(idempotent — safe to run on every connection). Access goes through a flat
+function-style facade in `storage/__init__.py` rather than the tables
+directly, so `bot.py`/`flight_api.py`/`airports.py` call e.g.
+`storage.load_flights()` exactly as before Phase 1.
+
+- **`subscriptions`**: one row per `/add` (replaces `flights.json`). Columns:
+  `id, name, flight_iata, scheduled_date, dep_country, arr_country, created_at`.
+  No uniqueness constraint — same behavior as before, duplicate adds allowed.
+- **`flights`**: one row per `(flight_iata, scheduled_date)` — **primary key is
+  composite**, replacing `state.json` + `schedule.json`, both of which used to
+  be keyed by `flight_iata` alone (the collision bug in "Known gaps" below).
+  Columns: polling bookkeeping (`last_checked, done, dep_scheduled,
+  arr_scheduled`) plus the last-known "key fields" snapshot used for change
+  detection (`status, dep_delay, arr_delay, dep_gate, arr_gate, dep_estimated,
+  arr_estimated`) and a `has_snapshot` flag distinguishing "never checked" from
+  "checked and every field happened to be null".
+- **`change_events`**: append-only audit log of detected field changes
+  (`flight_iata, scheduled_date, field, old_value, new_value, detected_at`).
+  Added in Phase 1's schema but **not yet written to or read by any code
+  path** — it exists so Phase 3's dedupe/debounce rewrite has somewhere to
+  record history without a second migration. Today's alert logic is otherwise
+  unchanged (see "Exact conditions under which an alert fires" below, which
+  still describes the live behavior).
+- **`api_usage`**: append-only request log (`provider, timestamp, endpoint,
+  http_status, counted`), matching `CLAUDE.md`'s target schema exactly.
+  Replaces the old mutable `usage.json` counter. `load_usage()`'s `count` is
+  computed with `COUNT(*) WHERE substr(timestamp,1,7) = this_month` — always
+  correct instantly, no on-disk staleness window (see `FINDINGS.md` #1 for the
+  bug this incidentally fixed).
+- **`usage_warnings`**: `(month PRIMARY KEY, warned)` — the "already warned
+  this month" flag, split out since it doesn't fit `api_usage`'s
+  one-row-per-request shape.
+- **`airports`**: `(iata PRIMARY KEY, country)`. Replaces
+  `airport_countries.json`; same cache-only-on-success semantics as before.
+
+**Composite-key convenience/ambiguity rule**: `get_flight_schedule`,
+`update_flight_schedule`, and `get_flight_schedule`'s callers may omit `date`.
+If exactly one row exists for that `flight_iata`, it's used (this keeps
+existing single-flight call sites — a bare `/status`, most tests — working
+unchanged). If more than one date is tracked for that flight number, omitting
+`date` raises `ValueError` rather than silently guessing. `bot.py`'s polling
+loop always passes `date` explicitly, so it never depends on this fallback.
+`storage.load_state()` still exists as a **read-only convenience view**
+(`{flight_iata: last_snapshot}`, flattened across dates, last-write-wins on a
+genuine collision) purely because Phase 0 tests call it directly — the actual
+polling loop uses the date-scoped `get_flight_state`/`save_flight_state`.
+
+**One-shot importer** (`storage/importer.py`, invoked from `bot.py:main()` on
+every startup, effectively no-op after the first): if any of the five old
+JSON files are found, imports their contents into the tables above, then
+renames each to `<name>.json.imported`. Where `state.json`/`schedule.json`
+entries can't be matched to exactly one `flights.json` subscription for that
+flight code (i.e. the data was *already* ambiguous under the old scheme), they
+import into a `scheduled_date = ""` sentinel row rather than guessing — a
+faithful migration of already-ambiguous data, not a new data-loss risk.
+
+## Storage: original JSON file schemas (Phase 0 history, superseded above)
+
+These files no longer exist once a bot has started once under Phase 1+ (the
+importer renames them to `*.json.imported`); this section is kept for
+historical context since it explains what the importer reads. All files lived
+in the working directory the bot was launched from and were created on first
+write. There was no locking beyond an in-process `threading.Lock` (no
 protection against two processes, and no atomic replace — a crash mid-`json.dump`
-truncates the file).
+truncated the file).
 
 **`flights.json`** — list of tracked flights, one entry per `/add`:
 ```json
@@ -214,13 +291,12 @@ actually failed.
   left in the calendar month (not the API's actual billing cycle, which may not
   align with the calendar month — this is a display approximation).
 
-## Known gaps versus `CLAUDE.md`'s target invariants (not fixed in Phase 0)
+## Known gaps versus `CLAUDE.md`'s target invariants
 
-- Flights are keyed by `flight_iata` alone in `state.json`/`schedule.json`, not
-  `(flight_iata, date)` — two people on the same flight number on different
-  dates share one schedule/state entry and will corrupt each other's tracking.
-  `flights.json` itself does store `date` per entry, so `/add`/`/list`/
-  `/bycountry` are fine; it's the polling/alerting side that collapses the key.
+- ~~Flights are keyed by `flight_iata` alone in `state.json`/`schedule.json`~~
+  **Fixed in Phase 1**: the `flights` table's primary key is
+  `(flight_iata, scheduled_date)`, so two people on the same flight number on
+  different dates now get independent rows.
 - No `chat_id` scoping anywhere — every file is implicitly global to the single
   `TELEGRAM_CHAT_ID` operator. Any chat that can reach the bot can `/add`,
   `/remove`, and read every tracked flight.
