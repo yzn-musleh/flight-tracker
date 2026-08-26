@@ -1,54 +1,52 @@
-"""Resolves an airport IATA code to a country name, with caching in SQLite.
+"""Resolves an airport IATA code to its country and timezone using a bundled
+offline dataset (static/airports.csv) -- no network call, no API quota spent,
+ever. Replaces the Phase 1 SQLite-cached live Aviationstack /v1/airports
+lookup entirely, per HARDENING_PLAN's Phase 2 scope.
 
-Caching matters because Aviationstack's free tier only allows 100
-requests/month -- once an airport (e.g. AMM) has been resolved once, it's
-never looked up again.
+The dataset is a filtered derivative of the OpenFlights Airport Database
+(itself sourced primarily from OurAirports); see static/AIRPORTS_LICENSE.md
+for its license (ODbL) and provenance.
 """
 
+import csv
 import os
 
-import requests
+_DATA_PATH = os.path.join(os.path.dirname(__file__), "static", "airports.csv")
+_by_iata: dict[str, dict] | None = None
 
-import storage
 
-AIRPORTS_URL = "https://api.aviationstack.com/v1/airports"
-
-# Unused since Phase 1 moved the cache into SQLite (storage.airports table).
-# Kept only so tests written against the old JSON-cache file path don't error
-# on setup; removed entirely once Phase 2 deletes the live airport lookup.
-CACHE_FILE = "airport_countries.json"
+def _load() -> dict[str, dict]:
+    global _by_iata
+    if _by_iata is None:
+        by_iata = {}
+        with open(_DATA_PATH, encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                by_iata[row["iata"]] = row
+        _by_iata = by_iata
+    return _by_iata
 
 
 def get_country(iata_code: str) -> str:
-    """Return the country name for an airport IATA code, or 'Unknown' if it can't be resolved yet."""
+    """Return the country name for an airport IATA code, or 'Unknown' if it's
+    not in the bundled dataset."""
     if not iata_code:
         return "Unknown"
-    iata_code = iata_code.upper()
+    row = _load().get(iata_code.upper())
+    return row["country"] if row else "Unknown"
 
-    cached = storage.get_airport_country(iata_code)
-    if cached is not None:
-        return cached
 
-    api_key = os.environ.get("AVIATIONSTACK_API_KEY")
-    if not api_key:
-        return "Unknown"
+def get_timezone(iata_code: str) -> str | None:
+    """Return the IANA timezone (e.g. 'Asia/Amman') for an airport IATA code,
+    or None if it's not in the bundled dataset or has no timezone recorded."""
+    if not iata_code:
+        return None
+    row = _load().get(iata_code.upper())
+    return (row["tz"] or None) if row else None
 
-    country = "Unknown"
-    try:
-        resp = requests.get(
-            AIRPORTS_URL,
-            params={"access_key": api_key, "iata_code": iata_code},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        payload = resp.json()
-        data = payload.get("data") or []
-        if data:
-            country = data[0].get("country_name") or "Unknown"
-    except Exception:
-        # Network hiccup or quota exhausted -- leave as Unknown, we'll retry next check.
-        return "Unknown"
 
-    if country != "Unknown":
-        storage.save_airport_country(iata_code, country)
-    return country
+def get_name(iata_code: str) -> str | None:
+    """Return the airport's full name, or None if it's not in the dataset."""
+    if not iata_code:
+        return None
+    row = _load().get(iata_code.upper())
+    return row["name"] if row else None

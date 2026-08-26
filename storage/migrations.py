@@ -83,6 +83,15 @@ MIGRATIONS: list[tuple[int, str]] = [
         );
         """,
     ),
+    (
+        2,
+        """
+        -- Phase 2 bundles an offline airport dataset (static/airports.csv)
+        -- and resolves country/timezone from it directly, at zero cost --
+        -- no live lookup, so no cache table is needed any more.
+        DROP TABLE airports;
+        """,
+    ),
 ]
 
 

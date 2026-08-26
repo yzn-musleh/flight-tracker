@@ -310,23 +310,3 @@ def mark_usage_warned() -> None:
             "ON CONFLICT(month) DO UPDATE SET warned = 1",
             (month,),
         )
-
-
-# --- airports (IATA -> country cache) ---------------------------------------
-
-
-def get_airport_country(iata_code: str) -> str | None:
-    with _db() as conn:
-        row = conn.execute(
-            "SELECT country FROM airports WHERE iata = ?", (iata_code,)
-        ).fetchone()
-    return row["country"] if row else None
-
-
-def save_airport_country(iata_code: str, country: str) -> None:
-    with _db() as conn:
-        conn.execute(
-            "INSERT INTO airports (iata, country) VALUES (?, ?) "
-            "ON CONFLICT(iata) DO UPDATE SET country = excluded.country",
-            (iata_code, country),
-        )

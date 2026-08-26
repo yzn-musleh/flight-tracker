@@ -9,18 +9,19 @@ flight code, we import into that specific (flight_iata, date) row; otherwise
 we fall back to the same "" date bucket get_flight_schedule()/
 get_flight_state() already treat as "no specific date known" -- this is a
 faithful migration of already-ambiguous data, not a new ambiguity.
+
+airport_countries.json's contents are intentionally discarded, not imported:
+Phase 2 replaced live-lookup-with-cache entirely with a bundled offline
+dataset (airports.py + static/airports.csv), so cached entries are both
+unnecessary and potentially stale. The file is still renamed to
+`.imported` like the others so it doesn't linger around looking unhandled.
 """
 
 import json
 import logging
 import os
 
-from . import (
-    add_flight,
-    save_airport_country,
-    save_flight_state,
-    update_flight_schedule,
-)
+from . import add_flight, save_flight_state, update_flight_schedule
 
 log = logging.getLogger("flight_tracker.storage.importer")
 
@@ -105,13 +106,7 @@ def run(base_dir: str = ".") -> None:
         if usage.get("warned"):
             mark_usage_warned()
 
-    airports = _load_json(airports_path, {})
-    for iata, country in airports.items():
-        save_airport_country(iata, country)
-
     for path in (flights_path, state_path, schedule_path, usage_path, airports_path):
         _mark_imported(path)
 
-    log.info(
-        "Import complete: %d flight(s), %d airport(s).", len(flights), len(airports)
-    )
+    log.info("Import complete: %d flight(s).", len(flights))
