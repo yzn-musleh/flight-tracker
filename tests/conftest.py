@@ -18,7 +18,7 @@ import pytest
 
 import storage
 
-XFAIL_SUPERSEDED_BY_SQLITE = {
+XFAIL_SUPERSEDED = {
     # Characterized a mutable JSON counter blob's on-disk staleness after a
     # month rollover. The SQLite api_usage table is a query-based event log
     # with no such staleness window -- see FINDINGS.md #1.
@@ -36,15 +36,21 @@ XFAIL_SUPERSEDED_BY_SQLITE = {
     "tests/test_airports.py::test_get_country_returns_unknown_without_api_key_and_makes_no_call",
     "tests/test_airports.py::test_get_country_does_not_cache_unresolved_lookup",
     "tests/test_airports.py::test_get_country_swallows_network_errors_as_unknown",
+    # This test's own docstring flagged it as documenting a bug (a field
+    # going non-null -> null incorrectly firing an alert) and said Phase 3
+    # was expected to fix it. Phase 3 did: change_detection.detect_changes()
+    # now enforces the null-guard. See FINDINGS.md #5. New coverage of the
+    # correct behavior is in tests/test_change_detection.py.
+    "tests/test_bot_alerts.py::test_alert_fires_on_value_to_null_transition",
 }
 
 
 def pytest_collection_modifyitems(config, items):
     for item in items:
-        if item.nodeid.replace("\\", "/") in XFAIL_SUPERSEDED_BY_SQLITE:
+        if item.nodeid.replace("\\", "/") in XFAIL_SUPERSEDED:
             item.add_marker(
                 pytest.mark.xfail(
-                    reason="Superseded by the Phase 1 SQLite storage rewrite; see FINDINGS.md",
+                    reason="Superseded by a later phase's intentional behavior change; see FINDINGS.md",
                     strict=False,
                 )
             )

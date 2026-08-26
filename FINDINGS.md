@@ -96,3 +96,35 @@ Phase 2, kept as a separate file rather than appended to the frozen
 `test_airports.py`). Only 1 of `test_airports.py`'s original 6 tests
 (`test_get_country_returns_unknown_for_empty_code`) still passes — the
 empty-input short-circuit is the one piece of behavior Phase 2 didn't touch.
+
+## 5. `test_bot_alerts.py::test_alert_fires_on_value_to_null_transition`
+
+**Phase:** 3 (correctness of alerts)
+
+**What it characterized:** a deliberately-preserved *bug*, not a design
+choice — the test's own docstring said so: "Documents a known bug (see
+ARCHITECTURE.md): a field disappearing is treated the same as a real
+change. Phase 3 is expected to fix this — if it does, this test should be
+updated there, not silently deleted." Pre-Phase-3, `check_all_flights`
+compared whole snapshots with a plain `!=`, so a field going from a real
+value to `null` (e.g. a gate briefly dropping out of the provider's
+response) counted as "changed" and fired an alert — violating `CLAUDE.md`
+invariant #2 ("Never alert on missing data... Only non-null -> different
+non-null... produce a message").
+
+**Why it can't pass anymore:** it fixed itself, on schedule. Phase 3
+introduced `change_detection.detect_changes()`, which enforces exactly this
+null-guard (plus the status whitelist for cancelled/diverted/landed). Given
+the same two polls as this test (gate `"12"` → `None`), the new logic
+correctly finds no alert-worthy change (both `old is not None and new is
+not None` fails, and `status` didn't change), so no message is sent —
+which is *why* `context.bot.send_message.assert_awaited_once()` now fails:
+zero awaits, not one.
+
+**Disposition:** left failing, marked `xfail`, per `CLAUDE.md`'s rule
+against editing a Phase 0 test even when the fix was fully anticipated by
+the test's own docstring — the rule doesn't carve out an exception for
+"but I meant to." New coverage of the *correct* behavior (no alert on a
+null transition, whitelisted alert on a null→terminal-status transition,
+dedupe-and-retry across a simulated crash) lives in
+`tests/test_change_detection.py`.
