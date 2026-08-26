@@ -79,7 +79,10 @@ def test_import_migrates_flights_state_schedule_usage_airports(tmp_path):
     )
     assert storage.load_usage()["count"] == 3
     assert storage.load_usage()["warned"] is True
-    assert storage.get_airport_country("AMM") == "Jordan"
+    # airport_countries.json's contents are intentionally discarded (Phase 2
+    # resolves country/timezone from the bundled static/airports.csv instead)
+    # but the file itself is still renamed like the others.
+    assert os.path.exists(tmp_path / "airport_countries.json.imported")
 
 
 def test_import_renames_source_files_so_a_second_run_is_a_no_op(tmp_path):

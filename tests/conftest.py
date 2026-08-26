@@ -6,11 +6,12 @@ at a fresh file per test instead of patching four separate JSON path
 constants -- the test *intent* (each test starts from empty, isolated state,
 never touches a real file, never hits the network) is unchanged from Phase 0.
 
-Three Phase 0 tests characterized JSON-file-specific implementation details
-that no longer exist once the backend is SQLite (see FINDINGS.md). Per
-CLAUDE.md's rule against editing a Phase 0 test to make it pass, their source
-is untouched; they're marked xfail here instead, in one place, with a reason
-that links to FINDINGS.md.
+A handful of Phase 0 tests characterized JSON-file-specific or live-network
+implementation details that no longer exist after Phase 1 (SQLite storage)
+and Phase 2 (bundled offline airport data) -- see FINDINGS.md for each one.
+Per CLAUDE.md's rule against editing a Phase 0 test to make it pass, their
+source is untouched; they're marked xfail here instead, in one place, with a
+reason that links to FINDINGS.md.
 """
 
 import pytest
@@ -24,10 +25,17 @@ XFAIL_SUPERSEDED_BY_SQLITE = {
     "tests/test_storage.py::test_usage_resets_in_memory_on_month_rollover_but_not_on_disk_until_next_write",
     # Both assert the airport-country cache is a JSON file at airports.CACHE_FILE.
     # Phase 1 moved that cache into the SQLite `airports` table -- see
-    # FINDINGS.md #2. (airports.CACHE_FILE itself is kept as an inert
-    # constant so these two continue to at least *run* rather than error.)
+    # FINDINGS.md #2.
     "tests/test_airports.py::test_get_country_caches_successful_lookup_to_disk",
     "tests/test_airports.py::test_get_country_uses_cache_without_calling_network_again",
+    # Phase 2 replaced the entire live-lookup-with-cache mechanism with a
+    # bundled offline dataset -- these characterized behavior (falls back to
+    # "Unknown" without an API key/on a network error; doesn't cache a miss)
+    # that no longer applies once there's no network call at all. See
+    # FINDINGS.md #4.
+    "tests/test_airports.py::test_get_country_returns_unknown_without_api_key_and_makes_no_call",
+    "tests/test_airports.py::test_get_country_does_not_cache_unresolved_lookup",
+    "tests/test_airports.py::test_get_country_swallows_network_errors_as_unknown",
 }
 
 

@@ -49,15 +49,50 @@ collapse into SQLite tables. `airports.py` now calls
 persist to the `airports` table in the same SQLite database as everything
 else — there is no longer any JSON file for these tests to inspect.
 
-**Disposition:** left failing, marked `xfail`. `airports.CACHE_FILE` is kept
-as an inert module constant (unused by `get_country()`) purely so these two
-tests still *run* against something rather than erroring in fixture setup;
-see the comment at its definition. New coverage for the SQLite-backed cache
-lives in `tests/test_storage_repository.py`
-(`test_airport_country_cache_hit_avoids_network` and neighbors). Note
-`airports.py`'s live network lookup — and therefore this whole cache,
-JSON or SQLite — is scheduled for deletion in Phase 2, which bundles an
-offline airport dataset instead; at that point all of `test_airports.py`
-becomes characterization of code that no longer exists and the same
-xfail-vs-delete question will need revisiting for the whole file, not just
-these two tests.
+**Disposition:** left failing, marked `xfail`. New coverage for the
+SQLite-backed cache lived in `tests/test_storage_repository.py` for Phase 1;
+that cache (and its tests) were themselves removed in Phase 2 — see #4 below,
+which is exactly the "revisit the whole file" moment anticipated here.
+
+## 4. `test_airports.py`: the three remaining live-network-lookup tests
+
+**Phase:** 2 (provider abstraction + offline airport data)
+
+**Tests:** `test_get_country_returns_unknown_without_api_key_and_makes_no_call`,
+`test_get_country_does_not_cache_unresolved_lookup`,
+`test_get_country_swallows_network_errors_as_unknown`.
+
+**What they characterized:** `airports.get_country()` used to call
+Aviationstack's `/v1/airports` live, gated on `AVIATIONSTACK_API_KEY` being
+set, swallowing network errors as `"Unknown"`. These three tests characterized
+that gating and error-swallowing behavior specifically.
+
+**Why they can't pass anymore:** `HARDENING_PLAN.md`'s Phase 2 scope
+explicitly says to "resolve country and timezone from [a bundled offline
+dataset] instead of API lookups" and "delete `airport_countries.json`
+entirely." `airports.py` now reads `static/airports.csv` (a filtered,
+ODbL-licensed derivative of the OpenFlights Airport Database — see
+`static/AIRPORTS_LICENSE.md` for provenance and license) at import time and
+never imports `requests` or touches an API key at all:
+- Without an API key: the old code returned `"Unknown"`; the new code
+  resolves airports from the bundled dataset regardless (e.g. `AMM` →
+  `"Jordan"`), since there's no key to be missing in the first place. The
+  first test's premise is gone.
+- The other two tests call `monkeypatch.setattr(airports, "requests", ...)`
+  / `airports.CACHE_FILE` to simulate a network failure/a cache miss — both
+  attributes no longer exist on the module, so these error in fixture setup
+  before their assertions even run.
+
+The Phase 1 SQLite `airports` table itself was also dropped (migration
+version 2 in `storage/migrations.py`) since a bundled, always-available,
+zero-cost dataset needs no cache at all.
+
+**Disposition:** left failing, marked `xfail`. `airports.CACHE_FILE`, kept
+in Phase 1 purely to let two tests still run, was removed in Phase 2 since
+by this point it wasn't saving any additional test from `xfail` status —
+keeping genuinely dead code for no benefit isn't worth it. New coverage for
+the offline dataset lives in `tests/test_airports_offline.py` (new in
+Phase 2, kept as a separate file rather than appended to the frozen
+`test_airports.py`). Only 1 of `test_airports.py`'s original 6 tests
+(`test_get_country_returns_unknown_for_empty_code`) still passes — the
+empty-input short-circuit is the one piece of behavior Phase 2 didn't touch.

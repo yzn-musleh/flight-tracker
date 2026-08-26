@@ -26,9 +26,11 @@ def test_migrations_create_expected_tables():
         "change_events",
         "api_usage",
         "usage_warnings",
-        "airports",
         "schema_version",
     } <= tables
+    # migration 2 drops the Phase 1 airports cache table -- Phase 2 resolves
+    # country/timezone from the bundled static/airports.csv dataset instead.
+    assert "airports" not in tables
 
 
 def test_migrations_are_idempotent_across_connections():
@@ -36,7 +38,7 @@ def test_migrations_are_idempotent_across_connections():
         pass
     with storage._db() as conn:
         version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
-    assert version == 1
+    assert version == 2
 
 
 def test_wal_mode_is_enabled():
@@ -107,15 +109,6 @@ def test_increment_usage_records_provider_and_endpoint():
     assert row["provider"] == "aviationstack"
     assert row["endpoint"] == "flights"
     assert row["http_status"] == 200
-
-
-def test_airport_country_cache_hit_avoids_network():
-    storage.save_airport_country("AMM", "Jordan")
-    assert storage.get_airport_country("AMM") == "Jordan"
-
-
-def test_airport_country_cache_miss_returns_none():
-    assert storage.get_airport_country("ZZZ") is None
 
 
 def test_db_file_is_actually_sqlite(tmp_path):
