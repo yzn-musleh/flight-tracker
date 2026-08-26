@@ -92,6 +92,21 @@ MIGRATIONS: list[tuple[int, str]] = [
         DROP TABLE airports;
         """,
     ),
+    (
+        3,
+        """
+        -- Phase 3: change_events becomes the durable dedupe/retry record for
+        -- alerts, not just an audit trail. sent=0 means "recorded before the
+        -- send was attempted, not yet confirmed delivered" -- a crash or
+        -- restart between recording and sending leaves it 0, so the next
+        -- poll retries it instead of silently losing or re-detecting it as
+        -- a brand new change (see CLAUDE.md invariant #1).
+        ALTER TABLE change_events ADD COLUMN sent INTEGER NOT NULL DEFAULT 0;
+
+        CREATE INDEX idx_change_events_pending
+            ON change_events (flight_iata, scheduled_date, sent);
+        """,
+    ),
 ]
 
 

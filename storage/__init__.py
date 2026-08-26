@@ -247,6 +247,69 @@ def save_flight_state(flight_iata: str, date: str, key_fields: dict) -> None:
         )
 
 
+# --- change_events (alert dedupe + crash-safe retry) ------------------------
+
+
+def record_pending_change(
+    flight_iata: str, date: str, field: str, old_value: object, new_value: object
+) -> bool:
+    """Durably record a detected, alert-worthy field change *before* any
+    send is attempted (CLAUDE.md invariant #1). Returns True if a new row was
+    inserted, False if an identical (flight, date, field, new_value) change
+    is already pending (sent=0) -- e.g. a crash happened after this was
+    recorded the first time but before it was sent, so re-detecting the same
+    transition on the next poll must not create a duplicate.
+    """
+    flight_iata = flight_iata.upper()
+    old_str = None if old_value is None else str(old_value)
+    new_str = None if new_value is None else str(new_value)
+    with _db() as conn:
+        existing = conn.execute(
+            "SELECT 1 FROM change_events WHERE flight_iata = ? AND scheduled_date = ? "
+            "AND field = ? AND new_value IS ? AND sent = 0",
+            (flight_iata, date, field, new_str),
+        ).fetchone()
+        if existing:
+            return False
+        conn.execute(
+            "INSERT INTO change_events "
+            "(flight_iata, scheduled_date, field, old_value, new_value, detected_at, sent) "
+            "VALUES (?, ?, ?, ?, ?, ?, 0)",
+            (
+                flight_iata,
+                date,
+                field,
+                old_str,
+                new_str,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        return True
+
+
+def get_pending_changes(flight_iata: str, date: str) -> list[dict]:
+    """All not-yet-confirmed-sent changes for one (flight_iata, date),
+    oldest first -- includes anything left over from a crash on a previous
+    poll, so a retry naturally bundles with whatever's new this poll."""
+    flight_iata = flight_iata.upper()
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT id, field, old_value, new_value, detected_at FROM change_events "
+            "WHERE flight_iata = ? AND scheduled_date = ? AND sent = 0 ORDER BY id",
+            (flight_iata, date),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_changes_sent(change_ids: list[int]) -> None:
+    if not change_ids:
+        return
+    with _db() as conn:
+        conn.executemany(
+            "UPDATE change_events SET sent = 1 WHERE id = ?", [(i,) for i in change_ids]
+        )
+
+
 def load_state() -> dict:
     """Read-only convenience view: {flight_iata: last_snapshot}, flattened
     across dates. Kept only because Phase 0 tests call it directly; the
