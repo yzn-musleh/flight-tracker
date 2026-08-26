@@ -1,8 +1,12 @@
 """Wrapper around the Aviationstack API for flight status lookups."""
+
 import os
+
 import requests
 
+import airports
 import storage
+import timezones
 
 AVIATIONSTACK_BASE_URL = "https://api.aviationstack.com/v1/flights"
 
@@ -28,7 +32,9 @@ def get_flight_status(flight_iata: str, flight_date: str = None) -> dict:
 
     cap = int(os.environ.get("MONTHLY_REQUEST_CAP", "100"))
     if storage.usage_remaining(cap) <= 0:
-        raise BudgetExhaustedError(f"Monthly API budget exhausted ({cap} requests/month).")
+        raise BudgetExhaustedError(
+            f"Monthly API budget exhausted ({cap} requests/month)."
+        )
 
     params = {"access_key": api_key, "flight_iata": flight_iata}
     if flight_date:
@@ -45,7 +51,8 @@ def get_flight_status(flight_iata: str, flight_date: str = None) -> dict:
     data = payload.get("data") or []
     if not data:
         raise FlightLookupError(
-            f"No flight found for {flight_iata}" + (f" on {flight_date}" if flight_date else "")
+            f"No flight found for {flight_iata}"
+            + (f" on {flight_date}" if flight_date else "")
         )
 
     return data[0]
@@ -83,14 +90,20 @@ def format_message(name: str, flight_iata: str, s: dict) -> str:
     lines.append(f"Status: {(s.get('status') or 'unknown').upper()}")
     lines.append(f"Departure: {s.get('dep_airport')}")
     if s.get("dep_estimated"):
-        lines.append(f"  Estimated: {s['dep_estimated']}")
+        rendered = timezones.render_dual(
+            s["dep_estimated"], airports.get_timezone(s.get("dep_iata"))
+        )
+        lines.append(f"  Estimated: {rendered}")
     if s.get("dep_delay"):
         lines.append(f"  Delay: {s['dep_delay']} min")
     if s.get("dep_gate"):
         lines.append(f"  Gate: {s['dep_gate']} (Terminal {s.get('dep_terminal', '-')})")
     lines.append(f"Arrival: {s.get('arr_airport')}")
     if s.get("arr_estimated"):
-        lines.append(f"  Estimated: {s['arr_estimated']}")
+        rendered = timezones.render_dual(
+            s["arr_estimated"], airports.get_timezone(s.get("arr_iata"))
+        )
+        lines.append(f"  Estimated: {rendered}")
     if s.get("arr_delay"):
         lines.append(f"  Delay: {s['arr_delay']} min")
     if s.get("arr_gate"):

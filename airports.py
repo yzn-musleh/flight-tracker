@@ -26,7 +26,7 @@ def _load() -> dict[str, dict]:
     return _by_iata
 
 
-def get_country(iata_code: str) -> str:
+def get_country(iata_code: str | None) -> str:
     """Return the country name for an airport IATA code, or 'Unknown' if it's
     not in the bundled dataset."""
     if not iata_code:
@@ -35,7 +35,7 @@ def get_country(iata_code: str) -> str:
     return row["country"] if row else "Unknown"
 
 
-def get_timezone(iata_code: str) -> str | None:
+def get_timezone(iata_code: str | None) -> str | None:
     """Return the IANA timezone (e.g. 'Asia/Amman') for an airport IATA code,
     or None if it's not in the bundled dataset or has no timezone recorded."""
     if not iata_code:
@@ -44,7 +44,7 @@ def get_timezone(iata_code: str) -> str | None:
     return (row["tz"] or None) if row else None
 
 
-def get_name(iata_code: str) -> str | None:
+def get_name(iata_code: str | None) -> str | None:
     """Return the airport's full name, or None if it's not in the dataset."""
     if not iata_code:
         return None

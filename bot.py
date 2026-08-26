@@ -10,6 +10,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 import airports
+import change_detection
 import flight_api
 import providers
 import scheduler
@@ -239,16 +240,36 @@ async def check_all_flights(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         previous = storage.get_flight_state(flight_iata, flight_date)
 
-        if previous != key_fields:
+        if previous is None:
+            # First-ever successful check: record a silent baseline, no alert.
             storage.save_flight_state(flight_iata, flight_date, key_fields)
-            if (
-                previous is not None
-            ):  # skip alert on the very first check, just record a baseline
-                text = "🔔 Update:\n" + flight_api.format_message(
-                    f["name"], flight_iata, summary
+            log.info("Recorded baseline for %s", flight_iata)
+            continue
+
+        if previous != key_fields:
+            for change in change_detection.detect_changes(previous, key_fields):
+                storage.record_pending_change(
+                    flight_iata,
+                    flight_date,
+                    change.field,
+                    change.old_value,
+                    change.new_value,
                 )
-                await context.bot.send_message(chat_id=CHAT_ID, text=text)
-            log.info("Recorded state for %s", flight_iata)
+            storage.save_flight_state(flight_iata, flight_date, key_fields)
+
+        # Checked unconditionally, not just when something changed this poll:
+        # a crash between recording a change and sending it leaves it pending
+        # with no further snapshot diff to re-trigger detection, so this is
+        # what actually retries it on the next poll (CLAUDE.md's "recorded as
+        # sent before the send is attempted, with reconciliation after").
+        pending = storage.get_pending_changes(flight_iata, flight_date)
+        if pending:
+            text = change_detection.format_alert_message(
+                f["name"], flight_iata, pending, summary
+            )
+            await context.bot.send_message(chat_id=CHAT_ID, text=text)
+            storage.mark_changes_sent([p["id"] for p in pending])
+        log.info("Recorded state for %s", flight_iata)
 
 
 def main() -> None:
