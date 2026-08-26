@@ -1,4 +1,5 @@
 """Telegram bot that tracks family flights to Jordan and alerts on status changes."""
+
 import calendar
 import logging
 import os
@@ -12,6 +13,7 @@ import airports
 import flight_api
 import scheduler
 import storage
+import storage.importer
 
 load_dotenv()
 
@@ -68,12 +70,18 @@ async def by_country(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     matches = [
         f
         for f in storage.load_flights()
-        if query in f.get("dep_country", "").lower() or query in f.get("arr_country", "").lower()
+        if query in f.get("dep_country", "").lower()
+        or query in f.get("arr_country", "").lower()
     ]
     if not matches:
-        await update.message.reply_text(f"No tracked flights involve '{' '.join(context.args)}'.")
+        await update.message.reply_text(
+            f"No tracked flights involve '{' '.join(context.args)}'."
+        )
         return
-    lines = [f"• {f['name']} — {f['flight_iata']} ({_route_label(f)}) on {f['date']}" for f in matches]
+    lines = [
+        f"• {f['name']} — {f['flight_iata']} ({_route_label(f)}) on {f['date']}"
+        for f in matches
+    ]
     await update.message.reply_text("\n".join(lines))
 
 
@@ -82,13 +90,17 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("Usage: /status <flight_iata>")
         return
     flight_iata = context.args[0].upper()
-    tracked = next((f for f in storage.load_flights() if f["flight_iata"] == flight_iata), None)
+    tracked = next(
+        (f for f in storage.load_flights() if f["flight_iata"] == flight_iata), None
+    )
     date = tracked["date"] if tracked else None
     name = tracked["name"] if tracked else flight_iata
     try:
         flight = flight_api.get_flight_status(flight_iata, date)
         summary = flight_api.summarize(flight)
-        await update.message.reply_text(flight_api.format_message(name, flight_iata, summary))
+        await update.message.reply_text(
+            flight_api.format_message(name, flight_iata, summary)
+        )
     except flight_api.BudgetExhaustedError:
         await update.message.reply_text(
             "Monthly API budget is exhausted — no requests left until it resets on the 1st."
@@ -173,12 +185,12 @@ async def check_all_flights(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     flights = storage.load_flights()
-    state = storage.load_state()
     now = datetime.now(timezone.utc)
 
     for f in flights:
         flight_iata = f["flight_iata"]
-        sched = storage.get_flight_schedule(flight_iata)
+        flight_date = f.get("date")
+        sched = storage.get_flight_schedule(flight_iata, flight_date)
         if not scheduler.is_due(f, sched, now):
             continue
 
@@ -186,15 +198,20 @@ async def check_all_flights(context: ContextTypes.DEFAULT_TYPE) -> None:
             flight = flight_api.get_flight_status(flight_iata, f.get("date"))
             summary = flight_api.summarize(flight)
         except flight_api.BudgetExhaustedError as e:
-            log.warning("Monthly budget exhausted mid-run, stopping periodic checks: %s", e)
+            log.warning(
+                "Monthly budget exhausted mid-run, stopping periodic checks: %s", e
+            )
             return
         except flight_api.FlightLookupError as e:
             log.warning("Lookup failed for %s: %s", flight_iata, e)
-            storage.update_flight_schedule(flight_iata, last_checked=now.isoformat())
+            storage.update_flight_schedule(
+                flight_iata, flight_date, last_checked=now.isoformat()
+            )
             continue
 
         storage.update_flight_schedule(
             flight_iata,
+            flight_date,
             last_checked=now.isoformat(),
             dep_scheduled=summary.get("dep_scheduled") or sched.get("dep_scheduled"),
             arr_scheduled=summary.get("arr_scheduled") or sched.get("arr_scheduled"),
@@ -213,18 +230,24 @@ async def check_all_flights(context: ContextTypes.DEFAULT_TYPE) -> None:
                 "arr_estimated",
             )
         }
-        if f.get("dep_country", "Unknown") == "Unknown" or f.get("arr_country", "Unknown") == "Unknown":
+        if (
+            f.get("dep_country", "Unknown") == "Unknown"
+            or f.get("arr_country", "Unknown") == "Unknown"
+        ):
             dep_country = airports.get_country(summary.get("dep_iata"))
             arr_country = airports.get_country(summary.get("arr_iata"))
             storage.update_flight_countries(flight_iata, dep_country, arr_country)
 
-        previous = state.get(flight_iata)
+        previous = storage.get_flight_state(flight_iata, flight_date)
 
         if previous != key_fields:
-            state[flight_iata] = key_fields
-            storage.save_state(state)
-            if previous is not None:  # skip alert on the very first check, just record a baseline
-                text = "🔔 Update:\n" + flight_api.format_message(f["name"], flight_iata, summary)
+            storage.save_flight_state(flight_iata, flight_date, key_fields)
+            if (
+                previous is not None
+            ):  # skip alert on the very first check, just record a baseline
+                text = "🔔 Update:\n" + flight_api.format_message(
+                    f["name"], flight_iata, summary
+                )
                 await context.bot.send_message(chat_id=CHAT_ID, text=text)
             log.info("Recorded state for %s", flight_iata)
 
@@ -233,6 +256,8 @@ def main() -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
         raise SystemExit("Set TELEGRAM_BOT_TOKEN in your .env file first.")
+
+    storage.importer.run()
 
     app = Application.builder().token(token).build()
     app.add_handler(CommandHandler("start", start))
@@ -244,7 +269,9 @@ def main() -> None:
     app.add_handler(CommandHandler("budget", budget))
 
     if app.job_queue:
-        app.job_queue.run_repeating(check_all_flights, interval=SCHEDULER_TICK_MINUTES * 60, first=10)
+        app.job_queue.run_repeating(
+            check_all_flights, interval=SCHEDULER_TICK_MINUTES * 60, first=10
+        )
 
     log.info(
         "Bot starting, scheduler tick every %s minutes (flights only polled inside their active window).",
