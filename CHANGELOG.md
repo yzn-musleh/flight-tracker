@@ -5,6 +5,39 @@ All notable changes to this project are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Phase 2 — Provider abstraction + offline airport data
+- Added a `providers/` package: `FlightProvider` Protocol, `QuotaPolicy`,
+  `FlightSnapshot` (`providers/base.py`); `AviationstackProvider`, a thin
+  adapter over the unchanged `flight_api.py` (`providers/aviationstack.py`);
+  `FakeProvider` for tests, driven by a queue of canned
+  snapshots/exceptions per flight code (`providers/fake.py`); provider
+  selection via the `FLIGHT_PROVIDER` env var, default `aviationstack`
+  (`providers/__init__.py`). `bot.py` now goes through `provider.get_flight()`
+  everywhere it used to call `flight_api.get_flight_status()` +
+  `flight_api.summarize()` as two separate steps — behavior-preserving (same
+  underlying calls, same exceptions), verified by the full existing test
+  suite passing unmodified.
+- Bundled an offline airport dataset (`static/airports.csv`, ODbL-licensed
+  derivative of the OpenFlights Airport Database, 6,072 airports with a
+  valid IATA code — see `static/AIRPORTS_LICENSE.md`). `airports.py` no
+  longer makes any network call, needs no API key, and has zero quota impact.
+  Dropped the Phase 1 `airports` SQLite table (now unused) via a new
+  migration (version 2) rather than editing the already-applied migration 1.
+- Added `docs/providers.md`: a researched comparison of AeroDataBox,
+  FlightAware AeroAPI, Aviation Edge, and OpenSky against live vendor
+  documentation (checked 2026-08-27), with a recommendation (AeroDataBox, if
+  a switch ever happens) and an explicit list of what could not be verified
+  from live sources. Aviationstack remains the default provider in code, per
+  this phase's scope.
+- Six Phase 0 tests (`test_airports.py`, five of its original six) and no
+  Phase 1 tests characterized network/cache behavior this phase deliberately
+  removed; left failing and marked `xfail` per `CLAUDE.md`'s rule against
+  editing a Phase 0 test — see `FINDINGS.md` #4. New coverage lives in
+  `tests/test_airports_offline.py` and `tests/test_providers.py`.
+- No new runtime dependencies (the `providers/` package uses only stdlib
+  typing/dataclasses; `static/airports.csv` is a plain data file read with
+  the stdlib `csv` module).
+
 ### Phase 1 — Storage: JSON → SQLite
 - Replaced the five flat JSON files with a single SQLite database
   (`flights.db`, WAL mode) behind a repository-style facade in the new

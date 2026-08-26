@@ -1,5 +1,97 @@
 # Progress Log
 
+## Phase 2 — Provider abstraction + offline airport data
+
+**What I did**
+- Branched `harden/phase-2-providers` from Phase 1's tip.
+- Added `providers/` (Protocol, Aviationstack adapter, FakeProvider,
+  selection factory) and wired `bot.py` to call `provider.get_flight()`
+  instead of `flight_api.get_flight_status()` + `flight_api.summarize()` at
+  all three call sites (`status`, `add_flight`, `check_all_flights`).
+- Downloaded the real OpenFlights Airport Database (`data/airports.dat`,
+  ~7,700 rows, fetched directly from the GitHub-hosted canonical source),
+  filtered it to the 6,072 rows with a valid 3-letter IATA code and the
+  4 columns this project needs (iata, name, country, tz), and bundled the
+  result as `static/airports.csv`, with `static/AIRPORTS_LICENSE.md`
+  documenting its ODbL license and exactly what transformation was applied
+  (required by ODbL §4.2/§4.4 since filtering constitutes a Derivative
+  Database). Verified real airports resolve correctly (spot-checked AMM,
+  JFK) before wiring `airports.py` to use it.
+- Rewrote `airports.py` to resolve country/timezone/name entirely from that
+  bundled file — no network, no API key, no quota impact.
+- Added migration version 2 (`DROP TABLE airports`) to retire the Phase 1
+  SQLite cache table, now unused.
+- Researched AeroDataBox, FlightAware AeroAPI, Aviation Edge, and OpenSky
+  against their own live documentation (via `WebFetch`/`WebSearch`, checked
+  2026-08-27) and wrote `docs/providers.md` with a comparison table and a
+  recommendation. Kept Aviationstack as the default provider in code, per
+  this phase's explicit scope note.
+- Updated `ARCHITECTURE.md`/`CHANGELOG.md` and added
+  `tests/test_providers.py`, `tests/test_airports_offline.py`.
+
+**What I decided and why**
+- **`get_flight()` returns a normalized `FlightSnapshot`, not the raw
+  provider payload.** This is what makes "adding a provider means adding one
+  file" actually true — if the Protocol returned each provider's raw wire
+  format, `bot.py` would need provider-specific parsing again. The existing
+  `flight_api.get_flight_status()` (raw payload) and `flight_api.summarize()`
+  (raw → normalized) are both left completely untouched and still directly
+  tested by Phase 0's `test_flight_api.py`; `AviationstackProvider.get_flight()`
+  is a thin two-line composition of both, not a reimplementation. I verified
+  this composition is transparent to every existing test by checking that
+  `providers/aviationstack.py` calls `flight_api.get_flight_status(...)` via
+  attribute access on the shared `flight_api` module object (not a
+  from-import), so a test's `monkeypatch.setattr(bot.flight_api,
+  "get_flight_status", ...)` still reaches it — confirmed by the full suite
+  passing with zero new xfails from this change.
+- **Exceptions stay in `flight_api.py`, not duplicated per-provider.** Every
+  provider that will plausibly exist needs the same two failure modes
+  (not found, quota exhausted); giving each provider its own exception types
+  would just push provider-awareness back into `bot.py`'s except clauses,
+  defeating the point of the Protocol. Documented this reasoning directly in
+  `providers/base.py`'s docstring since it's a non-obvious design choice.
+- **Downloaded a real dataset rather than writing one.** `HARDENING_PLAN.md`
+  says "OurAirports/OpenFlights CSV" explicitly; I used OpenFlights'
+  `airports.dat` (verified license: ODbL, confirmed against
+  `github.com/jpatokal/openflights`'s own `data/LICENSE` file, not assumed
+  from memory) because it already includes an IANA timezone column
+  (`tz_database_time_zone`), matching `CLAUDE.md`'s target
+  "IATA -> country, tz, name" exactly — OurAirports' own `airports.csv` would
+  have needed a separate join against a coordinates-to-timezone dataset to
+  get the `tz` column at all.
+- **Added a new migration to drop the `airports` table rather than editing
+  migration 1.** Nothing has "shipped" this table to a real deployed database
+  yet (this whole project is still mid-hardening), so quietly rewriting
+  migration 1 was tempting and would have been slightly less code — but
+  demonstrating the forward-only migration discipline now, while it's cheap
+  and low-stakes, is the point of having versioned migrations at all. Did the
+  same thing I'd do if this table had real user data in it.
+- **`get_provider()` validates and raises on an unknown `FLIGHT_PROVIDER`**
+  rather than silently falling back to Aviationstack — a typo'd env var
+  should fail loud at startup, not quietly ignore the operator's config.
+
+**What I deliberately did not do**
+- Did not migrate any existing test off directly stubbing
+  `flight_api.get_flight_status` and onto `FakeProvider` — both are valid
+  "no test hits a real API" strategies per `CLAUDE.md`'s Testing section, and
+  churning already-passing, already-frozen Phase 0 tests just to use the new
+  seam isn't this phase's job. `FakeProvider` exists and is tested in
+  isolation (`tests/test_providers.py`); future phases can build on it
+  directly without needing flight_api.py's internals at all.
+- Did not switch the default provider away from Aviationstack, sign up for
+  any other provider's API key, or verify any quota number by actually
+  making calls against a live key — all explicitly out of scope for this
+  phase, and the `docs/providers.md` research explicitly flags every number
+  I could not verify from a vendor's own live page rather than estimating.
+- Did not implement `supports_push`/webhook receiving for any provider —
+  `AviationstackProvider.supports_push = False` is accurate (it has no push
+  capability); building an actual webhook receiver is meaningful, unstarted
+  work that belongs with whichever future phase actually adopts a
+  push-capable provider, not this research-and-abstraction phase.
+- Did not remove `flight_api.py`'s pre-existing lint findings (implicit
+  Optional, etc.) — same reasoning as Phase 0/1, still out of this phase's
+  scope.
+
 ## Phase 1 — Storage: JSON → SQLite
 
 **What I did**

@@ -18,6 +18,19 @@ still going, and `CHANGELOG.md`/`PROGRESS.md` for the phase-by-phase history.
   and renames them to `*.json.imported`. The sections below describing JSON
   file schemas are Phase-0-era history, kept for context; see "Storage:
   SQLite schema (Phase 1+)" for the current shape.
+- **Phase 2**: added a `providers/` package (`FlightProvider` Protocol,
+  `QuotaPolicy`, `FlightSnapshot`) with `AviationstackProvider` (a thin
+  adapter over the unchanged `flight_api.py`) and `FakeProvider`, selected by
+  the `FLIGHT_PROVIDER` env var (default `aviationstack`). `bot.py` now calls
+  `provider.get_flight()` instead of `flight_api.get_flight_status()` +
+  `flight_api.summarize()` directly. `airports.py` no longer makes any
+  network call at all: country/timezone resolution now reads a bundled,
+  offline dataset (`static/airports.csv`, a filtered ODbL-licensed derivative
+  of the OpenFlights Airport Database — see `static/AIRPORTS_LICENSE.md`).
+  The Phase 1 `airports` SQLite table was dropped (migration version 2) since
+  it's no longer needed. See `docs/providers.md` for the researched
+  comparison of alternative providers and a recommendation — Aviationstack
+  remains the default in code per this phase's explicit scope.
 
 ## Modules
 
@@ -120,6 +133,40 @@ entries can't be matched to exactly one `flights.json` subscription for that
 flight code (i.e. the data was *already* ambiguous under the old scheme), they
 import into a `scheduled_date = ""` sentinel row rather than guessing — a
 faithful migration of already-ambiguous data, not a new data-loss risk.
+
+## Provider abstraction (Phase 2, current)
+
+`providers/base.py` defines the `FlightProvider` Protocol
+(`get_flight(flight_iata, date=None) -> FlightSnapshot`, plus declared
+`quota: QuotaPolicy` and `supports_push: bool`), `providers/aviationstack.py`
+implements it by wrapping `flight_api.py` unchanged (same wire format, same
+hard quota gate — the gate already lived inside `flight_api.get_flight_status`
+before this Protocol existed, satisfying `CLAUDE.md` invariant #3), and
+`providers/fake.py` implements it for tests via a queue of canned
+snapshots/exceptions per flight code. `providers/__init__.get_provider()`
+selects the implementation via the `FLIGHT_PROVIDER` env var (default
+`aviationstack`); `bot.py` holds one provider instance at module scope and
+calls `provider.get_flight(...)` everywhere it used to call
+`flight_api.get_flight_status()` + `flight_api.summarize()` as two steps.
+Exceptions (`flight_api.FlightLookupError`, `flight_api.BudgetExhaustedError`)
+are still defined in `flight_api.py` and propagate through the provider layer
+unchanged — see `providers/base.py`'s docstring for why they weren't
+duplicated as provider-specific types. See `docs/providers.md` for the
+Phase 2 research comparing AeroDataBox, FlightAware AeroAPI, Aviation Edge,
+and OpenSky against this Protocol, with a recommendation (AeroDataBox, if a
+switch happens) — Aviationstack stays the default in code for now.
+
+## Airport data (Phase 2, current)
+
+`airports.py` resolves IATA → country/timezone/name entirely from
+`static/airports.csv` (6,072 airports with a valid IATA code, filtered from
+the ~7,700-row OpenFlights Airport Database — see
+`static/AIRPORTS_LICENSE.md` for license/provenance), loaded once into an
+in-memory dict on first use. No network call, no API key, no quota impact,
+ever. This replaced both the original live Aviationstack `/v1/airports`
+lookup (Phase 0 baseline) and its Phase 1 SQLite cache table (dropped via
+migration version 2) in one step, per `HARDENING_PLAN.md`'s explicit Phase 2
+instruction to bundle offline data instead of caching a live lookup.
 
 ## Storage: original JSON file schemas (Phase 0 history, superseded above)
 
@@ -305,8 +352,9 @@ actually failed.
 - Timestamps are stored as whatever Aviationstack returns (ISO 8601 with
   offset, effectively UTC) but never explicitly normalized or rendered in a
   chosen timezone — display is just the raw ISO string.
-- Airport country resolution is a live, uncached-until-hit API call sharing no
-  budget accounting with the main quota.
+- ~~Airport country resolution is a live, uncached-until-hit API call sharing
+  no budget accounting with the main quota~~ **Fixed in Phase 2**: resolved
+  from a bundled offline dataset, zero network calls, zero quota impact.
 - No structured logging, no secret redaction (tokens aren't logged today, but
   nothing enforces that going forward), no circuit breaker/backoff beyond the
   monthly-cap check, no graceful shutdown, no single-instance lock.
