@@ -7,10 +7,16 @@ from typing import Any
 import requests
 
 import airports
+import resilience
 import storage
 import timezones
 
 AVIATIONSTACK_BASE_URL = "https://api.aviationstack.com/v1/flights"
+
+# One breaker per provider (CLAUDE.md: "429 and 5xx: exponential backoff
+# with jitter, per-provider circuit breaker"). Module-level since there's
+# exactly one Aviationstack account/key for the whole process.
+_breaker = resilience.CircuitBreaker(name="aviationstack")
 
 
 class FlightLookupError(Exception):
@@ -38,13 +44,49 @@ def get_flight_status(flight_iata: str, flight_date: str = None) -> dict:
             f"Monthly API budget exhausted ({cap} requests/month)."
         )
 
+    try:
+        _breaker.before_call()
+    except resilience.CircuitOpenError as e:
+        raise FlightLookupError(str(e)) from e
+
     params = {"access_key": api_key, "flight_iata": flight_iata}
     if flight_date:
         params["flight_date"] = flight_date
 
-    storage.increment_usage()
-    resp = requests.get(AVIATIONSTACK_BASE_URL, params=params, timeout=15)
-    resp.raise_for_status()
+    def _attempt():
+        # Each real attempt is a real request against Aviationstack's own
+        # quota, retries included -- counted individually so our local
+        # accounting can't undercount what actually happened server-side.
+        storage.increment_usage()
+        return requests.get(AVIATIONSTACK_BASE_URL, params=params, timeout=15)
+
+    try:
+        resp = resilience.retry_with_backoff(
+            _attempt,
+            is_retryable=lambda r: (
+                r.status_code in resilience.DEFAULT_RETRYABLE_STATUSES
+            ),
+        )
+    except requests.RequestException as e:
+        _breaker.record_failure()
+        raise FlightLookupError(f"Network error contacting Aviationstack: {e}") from e
+
+    if resp.status_code in resilience.DEFAULT_RETRYABLE_STATUSES:
+        _breaker.record_failure()
+    else:
+        _breaker.record_success()
+
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as e:
+        # 4xx other than 429: CLAUDE.md says "do not retry, log once, mark
+        # the flight as needing attention" -- surfacing as FlightLookupError
+        # is exactly that: bot.py's existing handling logs it once and moves
+        # on to the next flight instead of crashing the whole poll cycle.
+        raise FlightLookupError(
+            f"Aviationstack returned HTTP {resp.status_code}"
+        ) from e
+
     payload = resp.json()
 
     if "error" in payload:

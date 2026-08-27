@@ -3,6 +3,7 @@
 import calendar
 import logging
 import os
+import uuid
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -14,15 +15,18 @@ import access
 import airports
 import change_detection
 import flight_api
+import logging_config
 import providers
+import resilience
 import scheduler
+import singleton
 import storage
 import storage.importer
 import timezones
 
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging_config.configure(level=logging.INFO)
 log = logging.getLogger("flight_tracker")
 
 SCHEDULER_TICK_MINUTES = int(os.environ.get("SCHEDULER_TICK_MINUTES", "15"))
@@ -270,12 +274,14 @@ async def request_access_cmd(
     )
     for admin_chat_id in access.ALLOWED_CHAT_IDS:
         try:
-            await context.bot.send_message(
-                chat_id=admin_chat_id,
-                text=(
-                    f"Access request from chat {chat_id}.\n"
-                    f"Approve with /approve {chat_id} or deny with /deny {chat_id}."
-                ),
+            await resilience.send_with_retry(
+                lambda admin_chat_id=admin_chat_id: context.bot.send_message(
+                    chat_id=admin_chat_id,
+                    text=(
+                        f"Access request from chat {chat_id}.\n"
+                        f"Approve with /approve {chat_id} or deny with /deny {chat_id}."
+                    ),
+                )
             )
         except Exception as e:  # noqa: BLE001 -- best-effort notify, one admin's failure shouldn't block the rest
             log.warning(
@@ -295,9 +301,11 @@ async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     storage.set_chat_access_status(target, "approved", decided_by=chat_id)
     await update.message.reply_text(f"Approved {target}.")
     try:
-        await context.bot.send_message(
-            chat_id=target,
-            text="Your access request was approved. You can now use the bot.",
+        await resilience.send_with_retry(
+            lambda: context.bot.send_message(
+                chat_id=target,
+                text="Your access request was approved. You can now use the bot.",
+            )
         )
     except Exception as e:  # noqa: BLE001 -- approval already recorded; a failed notify shouldn't undo it
         log.warning("Couldn't notify chat %s of approval: %s", target, e)
@@ -317,6 +325,12 @@ async def deny(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def check_all_flights(context: ContextTypes.DEFAULT_TYPE) -> None:
+    # A correlation id per poll cycle (CLAUDE.md) -- every log line from this
+    # invocation carries it, so a support request ("what happened around
+    # 14:32?") can be traced through one cycle's worth of log lines even
+    # when several flights/chats are involved.
+    cycle_log = logging_config.with_correlation_id(log, uuid.uuid4().hex[:8])
+
     # Reserve REQUEST_SAFETY_MARGIN requests for manual /status calls — periodic
     # checks back off before the hard cap so a trip-day /status never gets refused.
     if storage.usage_remaining(MONTHLY_REQUEST_CAP) <= REQUEST_SAFETY_MARGIN:
@@ -325,19 +339,21 @@ async def check_all_flights(context: ContextTypes.DEFAULT_TYPE) -> None:
             storage.mark_usage_warned()
             for admin_chat_id in access.ALLOWED_CHAT_IDS:
                 try:
-                    await context.bot.send_message(
-                        chat_id=admin_chat_id,
-                        text=(
-                            "⚠️ Monthly Aviationstack request budget is nearly exhausted. "
-                            "Periodic checks are paused until it resets on the 1st "
-                            "(manual /status still works with the requests held in reserve)."
-                        ),
+                    await resilience.send_with_retry(
+                        lambda admin_chat_id=admin_chat_id: context.bot.send_message(
+                            chat_id=admin_chat_id,
+                            text=(
+                                "⚠️ Monthly Aviationstack request budget is nearly exhausted. "
+                                "Periodic checks are paused until it resets on the 1st "
+                                "(manual /status still works with the requests held in reserve)."
+                            ),
+                        )
                     )
                 except Exception as e:  # noqa: BLE001 -- best-effort notify, one admin's failure shouldn't block the rest
-                    log.warning(
+                    cycle_log.warning(
                         "Couldn't send budget warning to %s: %s", admin_chat_id, e
                     )
-        log.warning("Monthly budget near cap, pausing periodic checks.")
+        cycle_log.warning("Monthly budget near cap, pausing periodic checks.")
         return
 
     flights = storage.load_distinct_tracked_flights()
@@ -353,14 +369,17 @@ async def check_all_flights(context: ContextTypes.DEFAULT_TYPE) -> None:
         try:
             summary = provider.get_flight(flight_iata, flight_date)
         except flight_api.BudgetExhaustedError as e:
-            log.warning(
+            cycle_log.warning(
                 "Monthly budget exhausted mid-run, stopping periodic checks: %s", e
             )
             return
         except flight_api.FlightLookupError as e:
-            log.warning("Lookup failed for %s: %s", flight_iata, e)
+            cycle_log.warning("Lookup failed for %s: %s", flight_iata, e)
             storage.update_flight_schedule(
-                flight_iata, flight_date, last_checked=now.isoformat()
+                flight_iata,
+                flight_date,
+                last_checked=now.isoformat(),
+                next_poll_at=scheduler.compute_next_poll_at(f, sched, now),
             )
             continue
 
@@ -371,6 +390,7 @@ async def check_all_flights(context: ContextTypes.DEFAULT_TYPE) -> None:
             dep_scheduled=summary.get("dep_scheduled") or sched.get("dep_scheduled"),
             arr_scheduled=summary.get("arr_scheduled") or sched.get("arr_scheduled"),
             done=scheduler.mark_done(summary),
+            next_poll_at=scheduler.compute_next_poll_at(f, sched, now),
         )
 
         key_fields = {
@@ -404,7 +424,7 @@ async def check_all_flights(context: ContextTypes.DEFAULT_TYPE) -> None:
         if previous is None:
             # First-ever successful check: record a silent baseline, no alert.
             storage.save_flight_state(flight_iata, flight_date, key_fields)
-            log.info("Recorded baseline for %s", flight_iata)
+            cycle_log.info("Recorded baseline for %s", flight_iata)
             continue
 
         if previous != key_fields:
@@ -434,9 +454,13 @@ async def check_all_flights(context: ContextTypes.DEFAULT_TYPE) -> None:
                     summary,
                     subscriber_tz=subscriber_tz,
                 )
-                await context.bot.send_message(chat_id=sub["chat_id"], text=text)
+                await resilience.send_with_retry(
+                    lambda sub=sub, text=text: context.bot.send_message(
+                        chat_id=sub["chat_id"], text=text
+                    )
+                )
             storage.mark_changes_sent([p["id"] for p in pending])
-        log.info("Recorded state for %s", flight_iata)
+        cycle_log.info("Recorded state for %s", flight_iata)
 
 
 async def _post_init(app: Application) -> None:
@@ -461,32 +485,45 @@ def main() -> None:
     if not token:
         raise SystemExit("Set TELEGRAM_BOT_TOKEN in your .env file first.")
 
-    storage.importer.run()
+    try:
+        singleton.acquire()
+    except singleton.AlreadyRunningError as e:
+        raise SystemExit(str(e)) from e
 
-    app = Application.builder().token(token).post_init(_post_init).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("list", list_flights))
-    app.add_handler(CommandHandler("bycountry", by_country))
-    app.add_handler(CommandHandler("status", status))
-    app.add_handler(CommandHandler("add", add_flight))
-    app.add_handler(CommandHandler("remove", remove_flight))
-    app.add_handler(CommandHandler("budget", budget))
-    app.add_handler(CommandHandler("timezone", timezone_cmd))
-    app.add_handler(CommandHandler("forget", forget))
-    app.add_handler(CommandHandler("request_access", request_access_cmd))
-    app.add_handler(CommandHandler("approve", approve))
-    app.add_handler(CommandHandler("deny", deny))
+    try:
+        storage.importer.run()
 
-    if app.job_queue:
-        app.job_queue.run_repeating(
-            check_all_flights, interval=SCHEDULER_TICK_MINUTES * 60, first=10
+        app = Application.builder().token(token).post_init(_post_init).build()
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("list", list_flights))
+        app.add_handler(CommandHandler("bycountry", by_country))
+        app.add_handler(CommandHandler("status", status))
+        app.add_handler(CommandHandler("add", add_flight))
+        app.add_handler(CommandHandler("remove", remove_flight))
+        app.add_handler(CommandHandler("budget", budget))
+        app.add_handler(CommandHandler("timezone", timezone_cmd))
+        app.add_handler(CommandHandler("forget", forget))
+        app.add_handler(CommandHandler("request_access", request_access_cmd))
+        app.add_handler(CommandHandler("approve", approve))
+        app.add_handler(CommandHandler("deny", deny))
+
+        if app.job_queue:
+            app.job_queue.run_repeating(
+                check_all_flights, interval=SCHEDULER_TICK_MINUTES * 60, first=10
+            )
+
+        log.info(
+            "Bot starting, scheduler tick every %s minutes (flights only polled inside their active window).",
+            SCHEDULER_TICK_MINUTES,
         )
-
-    log.info(
-        "Bot starting, scheduler tick every %s minutes (flights only polled inside their active window).",
-        SCHEDULER_TICK_MINUTES,
-    )
-    app.run_polling()
+        # run_polling() installs SIGINT/SIGTERM/SIGABRT handlers by default
+        # on non-Windows platforms (verified against the installed
+        # python-telegram-bot's own docstring) and drains in-flight work
+        # before exiting -- graceful shutdown on the actual deployment
+        # target (Docker/Linux, Phase 6) needs nothing further here.
+        app.run_polling()
+    finally:
+        singleton.release()
 
 
 if __name__ == "__main__":
