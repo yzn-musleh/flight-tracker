@@ -20,7 +20,7 @@ status, delay, or gate changes. Also lets you check any flight on demand.
 
 1. Copy `.env.example` to `.env`.
 2. Fill in `TELEGRAM_BOT_TOKEN` and `AVIATIONSTACK_API_KEY`.
-3. Leave `TELEGRAM_CHAT_ID` blank for now — you'll get it in step 5.
+3. Leave `ALLOWED_CHAT_IDS` blank for now — you'll get your chat ID in step 5.
 
 ## 4. Install and run
 
@@ -33,11 +33,19 @@ Leave this running. For it to keep working while your laptop is closed,
 either run it on a small always-on machine (a Raspberry Pi, an old PC, or a
 cheap VPS), or use Windows Task Scheduler to start it at login.
 
-## 5. Connect it to your family chat
+## 5. Approve your own chat
 
-1. Open a chat with your bot in Telegram (or add it to a family group) and send `/start`.
-2. It replies with your chat ID. Put that in `TELEGRAM_CHAT_ID` in `.env`, then restart the bot.
-   This is the chat that will receive alerts.
+The bot supports multiple independent chats/groups (each only ever sees its
+own tracked flights), so every chat needs approval before it can do anything.
+
+1. Open a chat with your bot in Telegram (or add it to a family group) and
+   send `/start`. It replies with that chat's ID.
+2. Put that ID in `ALLOWED_CHAT_IDS` in `.env` (comma-separate multiple IDs
+   if more than one chat should be an operator/admin), then restart the bot.
+   This chat is now always approved and can also approve others.
+3. Any other chat that wants to use the bot sends `/request_access` — you'll
+   get a notification with `/approve <chat_id>` / `/deny <chat_id>` to
+   decide.
 
 ## 6. Add flights to track
 
@@ -54,12 +62,20 @@ Royal Jordanian 264).
 
 ## Commands
 
-- `/list` — show everyone currently tracked, grouped by departure country → arrival country (e.g. all "United States → Jordan" flights together, all "Jordan → United States" return flights together)
-- `/bycountry Jordan` — only show flights taking off from or landing in a given country
+- `/list` — show everyone *this chat* is currently tracking, grouped by departure country → arrival country (e.g. all "United States → Jordan" flights together, all "Jordan → United States" return flights together)
+- `/bycountry Jordan` — only show this chat's flights taking off from or landing in a given country
 - `/status RJ264` — check a flight right now
 - `/add <name> <flight_iata> <YYYY-MM-DD>` — track a new flight
-- `/remove RJ264` — stop tracking a flight
-- `/budget` — show how many of this month's Aviationstack requests are used up
+- `/remove RJ264` — stop tracking a flight (group chats: admins only)
+- `/forget` — delete all of this chat's tracked flights and settings (group chats: admins only)
+- `/timezone [IANA name]` — show or set the timezone flight times are shown in for this chat, e.g. `/timezone Asia/Amman`
+- `/budget` — show how many of this month's Aviationstack requests are used up (shared across every chat using this bot)
+- `/request_access` — ask the operator to approve this chat
+- `/approve <chat_id>`, `/deny <chat_id>` — operator-only, decide a pending request
+
+Every command except `/start` and `/request_access` only works once a chat
+is approved — see "Approve your own chat" above. A chat only ever sees and
+manages its own tracked flights, never another chat's.
 
 When you `/add` a flight, the bot looks it up immediately and auto-detects
 the departure and arrival country from the airport codes — no need to type
@@ -92,8 +108,8 @@ real change to status, delay, gate, or estimated time triggers a message —
 but a field going from a known value to unknown (a provider blip) never
 does, and a field going from unknown to known only does for status changes
 to cancelled/diverted/landed (those always alert, even with no prior status
-on record). Times are shown in both the airport's local timezone and
-`SUBSCRIBER_TIMEZONE` (default UTC).
+on record). Times are shown in both the airport's local timezone and this
+chat's timezone (`/timezone`, default `SUBSCRIBER_TIMEZONE`/UTC if never set).
 
 ## Notes
 

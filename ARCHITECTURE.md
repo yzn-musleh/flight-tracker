@@ -43,6 +43,23 @@ still going, and `CHANGELOG.md`/`PROGRESS.md` for the phase-by-phase history.
   `SUBSCRIBER_TIMEZONE`, a global stand-in for the per-chat setting Phase 4
   is expected to add) in both the alert text and `/status`'s
   `flight_api.format_message()`.
+- **Phase 4**: removed the global `TELEGRAM_CHAT_ID` entirely.
+  `storage.add_flight`/`load_flights`/`remove_flight`/`update_flight_countries`
+  now require `chat_id` (migration version 4 adds the column plus a `chats`
+  table for access status and per-chat timezone). New `access.py` module:
+  `ALLOWED_CHAT_IDS` (env var) are always-approved admin chats; any other
+  chat must `/request_access`, which notifies admins, who `/approve` or
+  `/deny` it. Every data-touching command is gated on approval
+  (`bot._require_access`). `check_all_flights` now polls each distinct
+  `(flight_iata, date)` once (`storage.load_distinct_tracked_flights`) and
+  fans the result out to every chat subscribed to it
+  (`storage.get_subscribers`) — CLAUDE.md's "poll the flight once; fan out
+  ... to every subscribed chat", satisfied for both country-backfill and
+  alerting. Added `/forget` (delete a chat's own data), `/timezone` (per-chat
+  override of `SUBSCRIBER_TIMEZONE`), and admin-only restriction of
+  `/remove`/`/forget` inside group chats (`bot._is_chat_admin`, real Telegram
+  chat-admin status — private chats are exempt). Registered the command list
+  via `set_my_commands` in an `Application.post_init` hook.
 
 ## Modules
 
@@ -96,8 +113,15 @@ directly, so `bot.py`/`flight_api.py`/`airports.py` call e.g.
 `storage.load_flights()` exactly as before Phase 1.
 
 - **`subscriptions`**: one row per `/add` (replaces `flights.json`). Columns:
-  `id, name, flight_iata, scheduled_date, dep_country, arr_country, created_at`.
-  No uniqueness constraint — same behavior as before, duplicate adds allowed.
+  `id, chat_id, name, flight_iata, scheduled_date, dep_country, arr_country,
+  created_at` (`chat_id` added Phase 4 — see below). No uniqueness
+  constraint — same behavior as before, duplicate adds allowed (even by the
+  same chat).
+- **`chats`** (Phase 4): one row per chat that has ever `/request_access`ed
+  or set a setting. Columns: `chat_id, access_status ('pending'|'approved'|
+  'denied'), timezone, requested_at, decided_at, decided_by`. A chat in
+  `ALLOWED_CHAT_IDS` (env var) is always treated as approved regardless of
+  what's in this table — see `access.py`.
 - **`flights`**: one row per `(flight_iata, scheduled_date)` — **primary key is
   composite**, replacing `state.json` + `schedule.json`, both of which used to
   be keyed by `flight_iata` alone (the collision bug in "Known gaps" below).
@@ -362,28 +386,85 @@ retry job — reconciliation piggybacks on the next regular poll.
 
 ## Command handlers (`bot.py`)
 
-- `/start`: static help text plus the caller's `chat.id`, no state read/written.
-- `/list`: groups all tracked flights by `f"{dep_country} → {arr_country}"`,
-  sorted by that label string, and lists `name — flight_iata on date` under each.
+Every command below except `/start` and `/request_access` first calls
+`_require_access(update)`, which replies with a rejection (and does nothing
+else) unless the calling chat is approved — see "Access control" below.
+
+- `/start`: static help text plus the caller's `chat.id`, no state read/written,
+  no access check (a chat needs to see this before it can even
+  `/request_access`).
+- `/list`: groups **this chat's own** tracked flights
+  (`storage.load_flights(chat_id)`) by `f"{dep_country} → {arr_country}"`,
+  sorted by that label string, and lists `name — flight_iata on date` under
+  each. Never sees another chat's flights.
 - `/bycountry <query>`: case-insensitive substring match against
-  `dep_country` or `arr_country`.
-- `/status <flight_iata>`: uppercases the code, looks up a tracked entry (for its
-  `name`/`date`, purely cosmetic — falls back to the code itself and no date) and
-  calls the API directly, live, **outside** the scheduler and its due-checking —
-  a manual `/status` still costs one request (if budget allows) regardless of
-  the flight's active window.
+  `dep_country` or `arr_country`, scoped to this chat.
+- `/status <flight_iata>`: uppercases the code, looks up a tracked entry
+  *among this chat's own* (for its `name`/`date`, purely cosmetic — falls
+  back to the code itself and no date) and calls the provider directly,
+  live, **outside** the scheduler and its due-checking — a manual `/status`
+  still costs one request (if budget allows) regardless of the flight's
+  active window. Renders times in this chat's timezone (`/timezone`).
 - `/add <name> <flight_iata> <date>`: validates the date format only (no check
   that `flight_iata` looks like a real IATA code, no dedupe against an existing
-  identical entry). Tries one live lookup to resolve countries immediately;
-  on `FlightLookupError` (e.g. too far in advance for the provider to have data)
-  it adds the flight anyway with `"Unknown"`/`"Unknown"`, silently swallowing the
-  error — the countries backfill later via the periodic job.
-- `/remove <flight_iata>`: removes **all** tracked entries matching that code
-  (case-insensitive), regardless of `date` or `name` — if two people are on the
-  same flight number on different dates, `/remove` takes out both.
-- `/budget`: reads `usage.json`, reports `count`/`MONTHLY_REQUEST_CAP` and days
+  identical entry, even from the same chat). Tries one live lookup to resolve
+  countries immediately; on `FlightLookupError` (e.g. too far in advance for
+  the provider to have data) it adds the flight anyway with
+  `"Unknown"`/`"Unknown"`, silently swallowing the error — the countries
+  backfill later via the periodic job. The new subscription belongs to the
+  calling chat.
+- `/remove <flight_iata>`: removes **all of this chat's own** tracked entries
+  matching that code (case-insensitive), regardless of `date` or `name` — if
+  two people *in the same chat* are tracking the same flight number on
+  different dates, `/remove` takes out both of that chat's entries, but never
+  another chat's. In a group chat, restricted to Telegram admins/creators
+  (`_is_chat_admin`); private chats are exempt (the single user already
+  controls their own chat).
+- `/forget`: deletes every subscription belonging to this chat plus its
+  `chats` row (access status, timezone) — `storage.forget_chat`. Same
+  group-admin restriction as `/remove`. Never touches another chat's data or
+  another chat's shared `flights`/`change_events` rows for a flight this
+  chat happens to also track.
+- `/timezone [IANA name]`: with no argument, shows the current effective
+  timezone (this chat's override, or the `SUBSCRIBER_TIMEZONE` default).
+  With an argument, validates it's a real IANA zone (`zoneinfo.ZoneInfo`)
+  before storing it as this chat's override.
+- `/request_access`: idempotent — a chat that's already approved or denied
+  gets told so and nothing changes; otherwise records a pending request and
+  messages every `ALLOWED_CHAT_IDS` admin with `/approve <chat_id>`/
+  `/deny <chat_id>` instructions. No access check (this is how access is
+  requested in the first place).
+- `/approve <chat_id>`, `/deny <chat_id>`: admin-only (`access.is_admin`,
+  i.e. the calling chat is in `ALLOWED_CHAT_IDS`) — not gated by
+  `_require_access` at all, since an admin chat is always approved anyway.
+  Records the decision and best-effort-notifies the target chat.
+- `/budget`: reads `api_usage`, reports `count`/`MONTHLY_REQUEST_CAP` and days
   left in the calendar month (not the API's actual billing cycle, which may not
-  align with the calendar month — this is a display approximation).
+  align with the calendar month — this is a display approximation). Global,
+  not per-chat — the quota is shared across every chat using this bot
+  instance.
+
+## Access control (`access.py`, Phase 4)
+
+- `ALLOWED_CHAT_IDS` (env var, comma-separated) are the operator's admin
+  chat(s) — always approved, and the only chats that can `/approve`/`/deny`.
+- Any other chat starts with no `chats` row at all (`get_chat_access_status`
+  returns `None`, distinct from `'pending'`). `/request_access` moves it to
+  `'pending'` and notifies admins; `/approve`/`/deny` moves it to
+  `'approved'`/`'denied'`.
+- `_require_access` (in `bot.py`, not `access.py` — it needs
+  `update.message.reply_text`) is the single gate every data-touching
+  handler calls first. A `'denied'` chat gets a specific message rather than
+  the generic "ask for access" one; asking again after denial doesn't reset
+  anything (`access.request_access` is idempotent once decided).
+- **Known limitation**: fan-out alerting (`check_all_flights`) does not
+  re-check a subscribed chat's current access status before sending — only
+  the commands that *create* a subscription are gated. A chat denied or
+  `/forget`-removed after subscribing simply has no subscription rows left
+  to fan out to (`/forget`) or was never approved to create one in the first
+  place (`/add`), so this is believed to not be exploitable in practice, but
+  it wasn't explicitly re-verified per-poll. See `PROGRESS.md`'s Phase 4
+  entry.
 
 ## Known gaps versus `CLAUDE.md`'s target invariants
 
@@ -391,9 +472,10 @@ retry job — reconciliation piggybacks on the next regular poll.
   **Fixed in Phase 1**: the `flights` table's primary key is
   `(flight_iata, scheduled_date)`, so two people on the same flight number on
   different dates now get independent rows.
-- No `chat_id` scoping anywhere — every file is implicitly global to the single
-  `TELEGRAM_CHAT_ID` operator. Any chat that can reach the bot can `/add`,
-  `/remove`, and read every tracked flight.
+- ~~No `chat_id` scoping anywhere~~ **Fixed in Phase 4**:
+  `subscriptions.chat_id` is required and enforced by every storage function;
+  an access-control gate (`access.py`) blocks unapproved chats from any
+  data-touching command entirely.
 - ~~No null-transition guard on alerts~~ **Fixed in Phase 3**:
   `change_detection.detect_changes()` enforces it, plus the
   cancelled/diverted/landed status whitelist.
@@ -405,10 +487,9 @@ retry job — reconciliation piggybacks on the next regular poll.
   timezone~~ **Partially fixed in Phase 3**: `timezones.py` renders stored
   UTC timestamps in the airport's local timezone and a subscriber timezone,
   in both the alert text and `/status`. Storage/comparison were always UTC
-  already (Aviationstack returns offset-aware ISO 8601). Still a gap: the
-  subscriber timezone is one global `SUBSCRIBER_TIMEZONE` env var, not a
-  per-chat setting — that needs Phase 4's chat_id-scoped subscriptions and a
-  `/timezone` command to do properly.
+  already (Aviationstack returns offset-aware ISO 8601). **Fully fixed in
+  Phase 4**: `/timezone` sets a per-chat override (`chats.timezone`),
+  falling back to `SUBSCRIBER_TIMEZONE` only for chats that haven't set one.
 - ~~Airport country resolution is a live, uncached-until-hit API call sharing
   no budget accounting with the main quota~~ **Fixed in Phase 2**: resolved
   from a bundled offline dataset, zero network calls, zero quota impact.

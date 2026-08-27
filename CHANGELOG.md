@@ -5,6 +5,40 @@ All notable changes to this project are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Phase 4 — Multi-user and access control
+- **Removed the global `TELEGRAM_CHAT_ID`.** Every subscription belongs to
+  the `chat_id` that created it (`storage.add_flight`/`load_flights`/
+  `remove_flight`/`update_flight_countries` now require it); no query can
+  cross from one chat's data to another's.
+- Added `access.py` and an access-control gate on every data-touching
+  command: `ALLOWED_CHAT_IDS` (env var) are always-approved admin chats;
+  any other chat must `/request_access`, which notifies admins, who
+  `/approve <chat_id>` or `/deny <chat_id>`.
+- Added `/forget` (delete this chat's own tracked flights and settings) and
+  `/timezone [IANA name]` (per-chat override of the default
+  `SUBSCRIBER_TIMEZONE`, validated against `zoneinfo`).
+- `/remove` and `/forget` are restricted to Telegram group admins/creators
+  inside group chats (private chats are exempt).
+- `check_all_flights` now polls each distinct `(flight_iata, date)` once and
+  fans the result out to every chat subscribed to it, rather than pushing
+  every alert to one operator chat — multiple chats tracking the same real
+  flight each get notified from a single provider lookup.
+- Registered the command list with Telegram via `set_my_commands`
+  (`Application.post_init`).
+- A one-shot importer upgrade: pre-existing `flights.json` entries are
+  assigned to the chat in the (still-read-for-this-purpose-only)
+  `TELEGRAM_CHAT_ID` env var, which is also auto-approved, so an upgrading
+  operator doesn't lose access to their own already-tracked flights.
+- Migration version 4 adds `subscriptions.chat_id` and a `chats` table
+  (access status + per-chat timezone).
+- 20 Phase 0 tests characterized the single-tenant model this phase
+  explicitly replaces (`HARDENING_PLAN.md`: *"There is no global 'the
+  chat' any more"*) — left failing and marked `xfail`; see `FINDINGS.md` #6.
+  New coverage (28 tests) is in `tests/test_multi_tenant.py`, covering
+  cross-tenant isolation, the approval flow, `/forget`, `/timezone`, and
+  group-admin restriction.
+- No new runtime dependencies (`zoneinfo` is stdlib).
+
 ### Phase 3 — Correctness of alerts
 - Added `change_detection.py`: pure, exhaustively-tested rules for which
   field changes are alert-worthy. Fixes the null-transition bug from the

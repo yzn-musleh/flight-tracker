@@ -1,5 +1,132 @@
 # Progress Log
 
+## Phase 4 — Multi-user and access control
+
+**What I did**
+- Branched `harden/phase-4-multi-user` from Phase 3's tip.
+- Migration version 4: `subscriptions.chat_id` (required going forward) and
+  a new `chats` table (access status, per-chat timezone).
+- Rewrote the relevant `storage.py` functions to take `chat_id` as a
+  required parameter, and added `forget_chat`, `load_distinct_tracked_flights`,
+  `get_subscribers`, and the `chats`-table access/timezone functions.
+- Added `access.py` (pure, no telegram import) and wired an access gate
+  (`bot._require_access`) into every data-touching handler.
+- Added `/forget`, `/timezone`, `/request_access`, `/approve`, `/deny`, and
+  a group-admin check (`bot._is_chat_admin`, real Telegram chat-member
+  status) gating `/remove` and `/forget` in group chats.
+- Rewrote `check_all_flights` to poll each distinct flight once and fan
+  alerts out to every subscribed chat, addressed with that chat's own
+  subscriber name and rendered in that chat's own timezone.
+- Registered the command list via `set_my_commands` in a `post_init` hook.
+- Updated the one-shot importer to assign legacy `flights.json` entries to
+  the chat in `TELEGRAM_CHAT_ID` (read once, for migration only) and
+  auto-approve that chat.
+- Extended `tests/fakes.py` additively (new optional constructor params:
+  `chat_type`, `user_id`, `chat_member_status` — all defaulting to values
+  that preserve every existing caller's behavior unchanged) so group-admin
+  scenarios could be tested without touching any Phase 0 test file.
+- Wrote `tests/test_multi_tenant.py` (28 tests): storage-level cross-tenant
+  isolation, the full access request/approve/deny flow, `/forget`,
+  `/timezone`, and group-admin restriction — all passing on the first run.
+- Ran mypy against every touched module; fixed the handful of genuinely new
+  type errors from my own code (widened three read-only "flight summary"
+  parameters from `dict` to `Mapping[str, Any]` in `scheduler.py`,
+  `flight_api.py`, and `change_detection.py`, since a `FlightProvider`'s
+  `FlightSnapshot` `TypedDict` isn't structurally assignable to a plain
+  `dict` parameter under mypy even though it behaves like one at runtime).
+
+**What I decided and why**
+- **This was, by a wide margin, the most test-file breakage of any phase —
+  20 Phase 0 tests, all `xfail`, all justified by the phase's own explicit
+  mandate.** `HARDENING_PLAN.md` doesn't say "add multi-tenancy carefully to
+  minimize test churn" — it says *"Remove the global TELEGRAM_CHAT_ID"* and
+  CLAUDE.md says *"There is no global 'the chat' any more."* Both are
+  unconditional. I considered (and rejected) keeping the old unscoped
+  `storage.add_flight()`/`load_flights()` around as a compatibility shim for
+  the importer or for tests: it wouldn't actually have saved the
+  `test_bot_handlers.py` tests that call it directly for fixture setup
+  (they'd still need a `chat_id` that matches what the handler under test
+  looks up), and keeping genuinely-superseded single-tenant code paths alive
+  purely to dodge `xfail` bookkeeping is exactly the kind of "keep dead code
+  to avoid a hard conversation" move `CLAUDE.md` and this project's own
+  hardening philosophy argue against. I did add one real, low-cost mitigation
+  instead: an autouse `approved_default_chat` fixture (`tests/conftest.py`)
+  that pre-approves the default `FakeUpdate` chat_id, which recovered five
+  handler tests (`test_list_flights_empty`, `test_by_country_requires_argument`,
+  both `test_status_reports_*`, `test_budget_reports_usage_and_days_left`)
+  for free, since they only exercise handlers and never call the changed
+  storage functions directly — that's a legitimate infra fix (adapting test
+  isolation to a new precondition), not a workaround for the changed
+  functions themselves.
+- **Fan-out is deduped by flight, not by (flight, chat).** Change detection
+  and the `change_events` dedupe/retry record are keyed by
+  `(flight_iata, scheduled_date, field, new_value)` — properties of the
+  *flight*, not of any one subscriber — and the message is composed once
+  per pending-changes batch, then sent to each current subscriber in a loop.
+  A newly-subscribed chat that joins after a change was already marked
+  `sent=1` won't get that historical alert (they can `/status` for current
+  info) — this mirrors the existing "first check is a silent baseline"
+  behavior and avoids needing a per-(flight, chat) delivery-tracking table,
+  which would be real added complexity for a benefit (replaying history to
+  late joiners) nobody asked for.
+- **A partial fan-out failure isn't perfectly exactly-once.** If sending to
+  subscriber 2 of 3 raises, the exception propagates immediately (matching
+  Phase 3's existing "don't mark sent on failure, let the next poll retry
+  everything" philosophy) — but subscriber 1, who already received it
+  successfully, would receive it *again* on the retried poll. Building true
+  per-recipient delivery tracking would fix this but is disproportionate for
+  a hobby-scale bot where a handful of family members might occasionally get
+  one duplicate message during a rare mid-fan-out failure, versus the
+  alternative of a subscriber silently never getting notified at all. Noted
+  as a known, accepted limitation rather than silently shipped.
+- **Access re-checked at subscribe-time, not at every poll.** `check_all_flights`
+  fans out to whoever currently has a subscription row, without re-verifying
+  that chat's access status is still `'approved'` on every tick. Since only
+  an approved chat could have created the subscription (`/add` is gated),
+  and `/forget` is the only way to remove one's own subscriptions, this
+  should be equivalent in practice — but it's not literally re-verified per
+  poll, so I documented it explicitly in `ARCHITECTURE.md` rather than
+  asserting it's airtight.
+- **Admins are exactly `ALLOWED_CHAT_IDS`, with no separate roles.** The
+  plan asks for "an admin approval flow" without specifying who the admins
+  are beyond "the operator" — reusing the already-necessary
+  bootstrap-trust-anchor (`ALLOWED_CHAT_IDS`, which has to exist for the
+  operator to use the bot at all before anyone requests access) avoids
+  inventing a second, separate admin-role concept for a single-operator
+  hobby project.
+- **Approval/denial notifications and admin broadcasts are best-effort.**
+  `/approve`, `/deny`, and the budget-exhaustion warning all wrap their
+  `send_message` calls in a broad `except Exception` (with `# noqa: BLE001`
+  explaining why) — the decision/state change already happened and
+  shouldn't be undone or blocked just because notifying the other party
+  failed (e.g. they blocked the bot).
+
+**What I deliberately did not do**
+- Did not build inline-keyboard approve/deny buttons — plain
+  `/approve <chat_id>` / `/deny <chat_id>` commands satisfy "an admin
+  approval flow" without the added complexity of `CallbackQueryHandler`s and
+  callback-data encoding. A nicer UX, not a missing requirement.
+- Did not register a separate, admin-only `set_my_commands` scope (e.g. via
+  `BotCommandScopeChat`) that would surface `/approve`/`/deny` to admins
+  specifically — the plan only asks for command list registration, not
+  per-role scoping.
+- Did not build per-(flight, chat) delivery tracking for exactly-once
+  fan-out — see above.
+- Did not add a way to reassign an already-imported legacy subscription's
+  `chat_id` if `TELEGRAM_CHAT_ID` wasn't set at import time (they land under
+  the literal chat_id `"legacy"`, inaccessible until manually fixed) — a
+  real gap for that specific upgrade edge case, called out in
+  `storage/importer.py`'s docstring rather than silently accepted.
+- Did not attempt to fix the ~50 pre-existing mypy `union-attr` errors in
+  `bot.py` (`update.message`/`update.effective_chat`/`update.effective_user`
+  typed `Optional` by `python-telegram-bot`'s own stubs, accessed without a
+  guard in code that predates this entire hardening effort) — fixing them
+  properly means an `assert update.message is not None`-style guard (or
+  equivalent) in nearly every handler, a large mechanical change with no
+  single natural phase home in `HARDENING_PLAN.md`. Flagging this explicitly
+  in `HANDOFF.md` as unfinished typing work rather than working around it
+  quietly.
+
 ## Phase 3 — Correctness of alerts
 
 **What I did**
