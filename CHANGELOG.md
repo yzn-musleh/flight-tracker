@@ -5,6 +5,45 @@ All notable changes to this project are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Phase 6 — Packaging and deployment
+- Added `pyproject.toml`: project metadata, a `dev` extra
+  (pytest/pytest-asyncio/ruff/mypy/time-machine, pinned to the exact
+  versions this project is developed and tested against), and
+  `[tool.pytest.ini_options]` (`pytest.ini` removed, superseded),
+  `[tool.ruff]`, `[tool.mypy]`. `requirements.txt` is kept alongside for
+  Docker's build step.
+- Setting an explicit `target-version = "py312"` for ruff surfaced 16
+  legitimate modernizations ruff hadn't been suggesting without a
+  configured target version — mainly `datetime.UTC` instead of
+  `datetime.timezone.utc`, and dropping a `.replace("Z", "+00:00")`
+  workaround that `datetime.fromisoformat` has handled natively since
+  Python 3.11. Fixed all of them (verified behavior-identical) rather than
+  leaving newly-surfaced findings unaddressed just because they weren't the
+  point of adding the config.
+- Added a multi-stage `Dockerfile`: builds dependencies in one stage, runs
+  as a non-root `flighttracker` user (uid 1000) in the final image, with a
+  `HEALTHCHECK` running the new `healthcheck.py`. Added `.dockerignore`
+  (never bakes `.env`/`*.db`/`*.lock` into an image). Added
+  `docker-compose.yml` with a named volume for the SQLite database and
+  lock file (`DB_PATH`/`LOCK_PATH` point at `/data` in the image) and
+  `.env` mounted via `env_file`. **Actually built and ran the image in this
+  session** — verified the non-root user, a clean `bot.py` import, the
+  healthcheck script's pass/fail behavior, and a real SQLite write to the
+  mounted `/data` path as that non-root user, not just written and assumed
+  correct.
+- Added `deploy/flight-tracker.service` (systemd unit: dedicated non-root
+  user, `Restart=on-failure`, light sandboxing via `ProtectSystem=strict`)
+  and `deploy/README.md` walking through non-Docker setup, per
+  `HARDENING_PLAN.md`'s "systemd unit as an alternative for non-Docker
+  users."
+- Added Telegram webhook mode as an alternative to long polling, selected
+  by `WEBHOOK_MODE`/`WEBHOOK_URL`/`WEBHOOK_PATH`/`WEBHOOK_LISTEN`/
+  `WEBHOOK_PORT`. The selection logic (`bot._webhook_config()`) is a pure
+  function independent of actually starting a server, so it's fully unit
+  tested (`tests/test_webhook_config.py`) without spinning up real HTTP.
+- No Phase 0 tests affected this phase — no xfails added.
+- No new runtime dependencies.
+
 ### Phase 5 — Resilience and the scheduler
 - Replaced recompute-from-`last_checked` scheduling with a persisted
   `next_poll_at` per flight (migration version 5): fixed at check-time using

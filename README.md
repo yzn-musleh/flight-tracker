@@ -24,14 +24,30 @@ status, delay, or gate changes. Also lets you check any flight on demand.
 
 ## 4. Install and run
 
+Three ways to run it continuously, in increasing order of how "always-on"
+they are. All three read the same `.env`.
+
+**Quickest, for trying it out:**
 ```bash
 pip install -r requirements.txt
 python bot.py
 ```
+Leave this running; closing the terminal stops the bot.
 
-Leave this running. For it to keep working while your laptop is closed,
-either run it on a small always-on machine (a Raspberry Pi, an old PC, or a
-cheap VPS), or use Windows Task Scheduler to start it at login.
+**Docker (recommended for an always-on machine):**
+```bash
+docker compose up -d --build
+```
+Builds the multi-stage `Dockerfile` (runs as a non-root user, has a
+`HEALTHCHECK`), and stores the SQLite database + lock file in a named
+volume (`docker-compose.yml`) so they survive a rebuild. `docker compose
+logs -f` to follow the structured JSON logs; `docker compose restart` to
+apply an updated `.env`.
+
+**systemd (no Docker, e.g. a Raspberry Pi or a VPS you manage directly):**
+See [`deploy/README.md`](deploy/README.md) for the full setup —
+`deploy/flight-tracker.service` runs it as a dedicated non-root user with
+automatic restart on failure.
 
 ## 5. Approve your own chat
 
@@ -110,6 +126,16 @@ does, and a field going from unknown to known only does for status changes
 to cancelled/diverted/landed (those always alert, even with no prior status
 on record). Times are shown in both the airport's local timezone and this
 chat's timezone (`/timezone`, default `SUBSCRIBER_TIMEZONE`/UTC if never set).
+
+## Webhook mode
+
+By default the bot long-polls Telegram (no inbound network access needed at
+all). Set `WEBHOOK_MODE=true` in `.env` to instead have Telegram push
+updates to a public HTTPS URL — `WEBHOOK_URL` (required), `WEBHOOK_PATH`,
+`WEBHOOK_LISTEN`, and `WEBHOOK_PORT` control the rest. This fits a
+reverse-proxy or tunnel setup (e.g. Cloudflare Tunnel) that terminates TLS
+externally: the bot process itself only ever speaks plain HTTP on
+`WEBHOOK_LISTEN:WEBHOOK_PORT`, never holding an outbound connection open.
 
 ## Notes
 

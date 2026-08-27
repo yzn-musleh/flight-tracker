@@ -1,5 +1,91 @@
 # Progress Log
 
+## Phase 6 — Packaging and deployment
+
+**What I did**
+- Branched `harden/phase-6-packaging` from Phase 5's tip.
+- Added `pyproject.toml` (project metadata, `dev` extra, tool config for
+  pytest/ruff/mypy), removed `pytest.ini` (superseded), verified pytest
+  still picked up the moved config correctly by running the full suite.
+- Discovered that setting `target-version = "py312"` for ruff (not present
+  before — there was no ruff config file at all until this pyproject.toml)
+  changed ruff's *effective* findings, not just documented an assumption:
+  it surfaced 16 new `UP017`/`FURB162` findings across 5 files that ruff's
+  own defaults hadn't been suggesting without a known target version.
+  Verified each category was behavior-identical before fixing (tested
+  `datetime.fromisoformat` with a literal `"Z"` suffix directly in this
+  Python 3.14 environment to confirm it parses identically to the
+  `.replace("Z", "+00:00")` workaround) and fixed all of them, including in
+  Phase-0-authored `scheduler.py` — a pure type/spelling change, not a
+  behavior change, with the whole test suite as evidence.
+- Wrote the multi-stage `Dockerfile`, `.dockerignore`, `docker-compose.yml`,
+  `healthcheck.py`, `deploy/flight-tracker.service`, and `deploy/README.md`.
+- **Actually built and ran the Docker image** (Docker Desktop was available
+  in this environment) rather than only writing a Dockerfile and trusting
+  it: `docker build` succeeded end-to-end; then, with `--entrypoint`
+  overrides, confirmed `whoami`/`id` report the non-root `flighttracker`
+  user (uid 1000), `python -c "import bot"` succeeds cleanly, and
+  `healthcheck.py` correctly exits 1 with no lock file present. Then ran a
+  script inside the container that acquired the single-instance lock and
+  wrote a real SQLite row under `/data` (the volume mount point) as that
+  non-root user, confirming the permissions (`chown` in the Dockerfile) are
+  actually correct, not just plausible-looking. Cleaned up the test image
+  afterward.
+- Added `bot._webhook_config()` (pure, testable independent of starting a
+  server) and wired it into `main()`; wrote
+  `tests/test_webhook_config.py` covering the mode-selection logic
+  (falsy/truthy env values, missing `WEBHOOK_URL` raising, URL/path
+  joining, listen/port defaults and overrides) and
+  `tests/test_healthcheck.py` for the healthcheck script's own logic.
+
+**What I decided and why**
+- **Fixed the newly-surfaced ruff findings rather than avoiding
+  `target-version` to dodge them.** I could have left `[tool.ruff]` without
+  a `target-version` to keep ruff's output byte-identical to before this
+  phase — but that would mean deliberately keeping ruff *less accurate*
+  about what Python version this project actually targets (CLAUDE.md says
+  3.12+) just to avoid a one-time cleanup. Since every one of the 16
+  findings was a mechanical, verified-behavior-identical modernization
+  (confirmed via `ruff --fix` for `UP017` and a direct behavior check for
+  `FURB162`), fixing them was the more honest choice — and since none of
+  them touch any function's observable behavior (only *how* an equivalent
+  UTC value is spelled), no Phase 0 test was at risk and none needed
+  touching.
+- **Kept `requirements.txt` alongside `pyproject.toml` rather than
+  replacing it.** `Dockerfile`'s build stage installs from
+  `requirements.txt` directly (`pip install -r requirements.txt`) rather
+  than doing a full `pip install .` build-backend resolution inside the
+  image — simpler, faster build, and avoids needing `pyproject.toml`'s
+  `[build-system]` to be exercised in a context (a container build) where
+  a slow or subtly different resolution would be an annoying place to debug
+  it for the first time.
+- **The Docker healthcheck checks process liveness via the single-instance
+  lock, not an HTTP ping** — deliberately mode-agnostic (works identically
+  whether `WEBHOOK_MODE` is on or off) rather than writing two different
+  healthcheck strategies for two run modes. Trade-off: it can confirm the
+  process hasn't crashed/been silently replaced, but can't detect "the
+  process is alive but Telegram's API is unreachable" the way an HTTP
+  self-check against a webhook-mode-only endpoint could. Judged proportionate
+  for this project's scale; noted here rather than left silently unstated.
+- **systemd unit assumes a specific path/user** (`/opt/flight-tracker`,
+  `flighttracker`) with clear instructions to adjust both if different —
+  matches `deploy/README.md`'s own setup steps exactly rather than being a
+  generic template disconnected from the instructions that reference it.
+
+**What I deliberately did not do**
+- Did not add an HTTP `/health` endpoint even in webhook mode — the
+  process-liveness check covers the case this project actually needs
+  (detect a crashed/hung container) without adding a second code path.
+- Did not push the built image anywhere or set up a container registry /
+  CI image-publish step — that's Phase 7's GitHub Actions territory, if
+  in scope there at all; this phase only needed the image to build and run
+  correctly, which was verified directly.
+- Did not restructure the flat module layout into an installable
+  `src/`-style package — `pyproject.toml`'s `[tool.setuptools]` uses
+  `py-modules`/`packages.find` against the existing flat layout rather than
+  moving files, since nothing in this phase's scope (Docker/systemd
+  deployment) needs the project to be pip-installable by a third party.
+
 ## Phase 5 — Resilience and the scheduler
 
 **What I did**

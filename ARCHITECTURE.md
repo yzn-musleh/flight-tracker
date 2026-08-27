@@ -81,6 +81,23 @@ still going, and `CHANGELOG.md`/`PROGRESS.md` for the phase-by-phase history.
   `Application.run_polling()` already installs SIGINT/SIGTERM/SIGABRT
   handlers and drains gracefully by default on non-Windows platforms —
   confirmed from the installed library's own docstring, not assumed.
+- **Phase 6**: added `pyproject.toml` (project metadata, dev extras, and
+  `[tool.pytest.ini_options]`/`[tool.ruff]`/`[tool.mypy]` config —
+  `pytest.ini` removed, superseded). Setting `target-version = "py312"` in
+  `[tool.ruff]` surfaced 16 legitimate, behavior-preserving modernizations
+  (`datetime.UTC` alias, dropping a now-redundant `.replace("Z", "+00:00")`
+  workaround `datetime.fromisoformat` has handled natively since 3.11) that
+  ruff hadn't been suggesting without a configured target version; fixed all
+  of them rather than leaving newly-surfaced findings unaddressed. Added a
+  multi-stage `Dockerfile` (non-root `flighttracker` user, `HEALTHCHECK`
+  running `healthcheck.py`) and `docker-compose.yml` (named volume for the
+  SQLite file + lock file, `.env` mounted) — both actually built and run in
+  this session (not just written), including a real container writing to
+  its mounted `/data` path as the non-root user. Added `deploy/` (a systemd
+  unit + setup instructions) as the non-Docker alternative. Added webhook
+  mode: `bot._webhook_config()` (a pure, independently-testable function)
+  selects `run_webhook()` vs `run_polling()` from `WEBHOOK_MODE`/`WEBHOOK_URL`/
+  `WEBHOOK_PATH`/`WEBHOOK_LISTEN`/`WEBHOOK_PORT`.
 
 ## Modules
 
