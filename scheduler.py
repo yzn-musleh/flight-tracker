@@ -6,8 +6,11 @@ often as its tier interval dictates. This keeps monthly request usage low
 since most of a flight's tracked lifetime (weeks/months before departure)
 costs nothing at all.
 """
+
 import os
+from collections.abc import Mapping
 from datetime import datetime, timedelta
+from typing import Any
 
 TERMINAL_STATUSES = {"landed", "cancelled"}
 
@@ -25,7 +28,7 @@ def _parse_iso(value):
         return None
 
 
-def mark_done(summary: dict) -> bool:
+def mark_done(summary: Mapping[str, Any]) -> bool:
     """True once a flight has nothing left worth polling for."""
     if not summary:
         return False

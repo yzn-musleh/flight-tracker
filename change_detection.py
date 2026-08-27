@@ -12,7 +12,9 @@ This module is pure (no I/O, no storage, no Telegram) so it's exhaustively
 testable without touching a database or a bot.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 import airports
 import timezones
@@ -84,7 +86,10 @@ def detect_changes(previous: dict | None, current: dict) -> list[FieldChange]:
 
 
 def _render_field(
-    field: str, new_value: str | int | None, summary: dict, subscriber_tz: str | None
+    field: str,
+    new_value: str | int | None,
+    summary: Mapping[str, Any],
+    subscriber_tz: str | None,
 ) -> str:
     label = FIELD_LABELS.get(field, field)
     if field == "status":
@@ -108,7 +113,7 @@ def format_alert_message(
     name: str,
     flight_iata: str,
     pending_changes: list[dict],
-    summary: dict,
+    summary: Mapping[str, Any],
     subscriber_tz: str | None = None,
 ) -> str:
     """Compose one message covering every pending change for a flight --

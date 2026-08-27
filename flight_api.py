@@ -1,6 +1,8 @@
 """Wrapper around the Aviationstack API for flight status lookups."""
 
 import os
+from collections.abc import Mapping
+from typing import Any
 
 import requests
 
@@ -85,13 +87,15 @@ def summarize(flight: dict) -> dict:
     }
 
 
-def format_message(name: str, flight_iata: str, s: dict) -> str:
+def format_message(
+    name: str, flight_iata: str, s: Mapping[str, Any], subscriber_tz: str | None = None
+) -> str:
     lines = [f"✈️ {name} — {flight_iata} ({s.get('airline') or 'unknown airline'})"]
     lines.append(f"Status: {(s.get('status') or 'unknown').upper()}")
     lines.append(f"Departure: {s.get('dep_airport')}")
     if s.get("dep_estimated"):
         rendered = timezones.render_dual(
-            s["dep_estimated"], airports.get_timezone(s.get("dep_iata"))
+            s["dep_estimated"], airports.get_timezone(s.get("dep_iata")), subscriber_tz
         )
         lines.append(f"  Estimated: {rendered}")
     if s.get("dep_delay"):
@@ -101,7 +105,7 @@ def format_message(name: str, flight_iata: str, s: dict) -> str:
     lines.append(f"Arrival: {s.get('arr_airport')}")
     if s.get("arr_estimated"):
         rendered = timezones.render_dual(
-            s["arr_estimated"], airports.get_timezone(s.get("arr_iata"))
+            s["arr_estimated"], airports.get_timezone(s.get("arr_iata")), subscriber_tz
         )
         lines.append(f"  Estimated: {rendered}")
     if s.get("arr_delay"):
