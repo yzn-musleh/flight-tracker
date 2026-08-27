@@ -107,6 +107,34 @@ MIGRATIONS: list[tuple[int, str]] = [
             ON change_events (flight_iata, scheduled_date, sent);
         """,
     ),
+    (
+        4,
+        """
+        -- Phase 4: chat_id becomes the tenant boundary (CLAUDE.md invariant
+        -- #5). Every subscription now belongs to the chat that created it;
+        -- there is no more global "the chat". Default '' only matters for
+        -- the ALTER itself (SQLite requires a constant default when adding a
+        -- NOT NULL column to a possibly-non-empty table) -- nothing in this
+        -- project has ever shipped with real subscription rows, so no
+        -- backfill migration for existing data is needed.
+        ALTER TABLE subscriptions ADD COLUMN chat_id TEXT NOT NULL DEFAULT '';
+
+        CREATE INDEX idx_subscriptions_chat_id ON subscriptions (chat_id);
+
+        -- Per-chat access approval state and settings. access_status is
+        -- 'pending' | 'approved' | 'denied'; a chat_id in ALLOWED_CHAT_IDS
+        -- (env var) is always treated as approved regardless of what's (or
+        -- isn't) in this table -- see access.py.
+        CREATE TABLE chats (
+            chat_id TEXT PRIMARY KEY,
+            access_status TEXT NOT NULL DEFAULT 'pending',
+            timezone TEXT,
+            requested_at TEXT NOT NULL,
+            decided_at TEXT,
+            decided_by TEXT
+        );
+        """,
+    ),
 ]
 
 

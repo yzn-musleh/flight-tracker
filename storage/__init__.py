@@ -85,18 +85,26 @@ def _resolve_date(conn, flight_iata: str, date: str | None) -> str:
 
 
 # --- subscriptions (who's tracking what) ------------------------------------
+#
+# chat_id is the tenant boundary (CLAUDE.md invariant #5): every one of these
+# functions is scoped to a single chat_id, except the two explicitly named
+# "all chats" below, which exist only for the poll loop (which polls a
+# flight once regardless of how many chats track it) and are never used to
+# answer a query on a specific chat's behalf.
 
 
-def load_flights() -> list[dict]:
+def load_flights(chat_id: str) -> list[dict]:
     with _db() as conn:
         rows = conn.execute(
             "SELECT name, flight_iata, scheduled_date AS date, dep_country, arr_country "
-            "FROM subscriptions ORDER BY id"
+            "FROM subscriptions WHERE chat_id = ? ORDER BY id",
+            (chat_id,),
         ).fetchall()
     return [dict(r) for r in rows]
 
 
 def add_flight(
+    chat_id: str,
     name: str,
     flight_iata: str,
     date: str,
@@ -106,9 +114,10 @@ def add_flight(
     with _db() as conn:
         conn.execute(
             "INSERT INTO subscriptions "
-            "(name, flight_iata, scheduled_date, dep_country, arr_country, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "(chat_id, name, flight_iata, scheduled_date, dep_country, arr_country, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
+                chat_id,
                 name,
                 flight_iata.upper(),
                 date,
@@ -119,17 +128,54 @@ def add_flight(
         )
 
 
-def remove_flight(flight_iata: str) -> bool:
+def remove_flight(chat_id: str, flight_iata: str) -> bool:
     flight_iata = flight_iata.upper()
     with _db() as conn:
         cur = conn.execute(
-            "DELETE FROM subscriptions WHERE flight_iata = ?", (flight_iata,)
+            "DELETE FROM subscriptions WHERE chat_id = ? AND flight_iata = ?",
+            (chat_id, flight_iata),
         )
         return cur.rowcount > 0
 
 
+def forget_chat(chat_id: str) -> int:
+    """Deletes every subscription belonging to chat_id, plus its access/
+    settings row. Does not touch the shared `flights`/`change_events` rows
+    for any flight another chat still tracks -- those aren't this chat's
+    data. Returns how many subscriptions were deleted."""
+    with _db() as conn:
+        cur = conn.execute("DELETE FROM subscriptions WHERE chat_id = ?", (chat_id,))
+        conn.execute("DELETE FROM chats WHERE chat_id = ?", (chat_id,))
+        return cur.rowcount
+
+
+def load_distinct_tracked_flights() -> list[dict]:
+    """Every distinct (flight_iata, date) tracked by *any* chat -- for the
+    poll loop only, which fetches a flight's status once and fans the result
+    out to every chat subscribed to it (CLAUDE.md's "poll the flight once;
+    fan out ... to every subscribed chat"). Never used to answer a specific
+    chat's /list."""
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT flight_iata, scheduled_date AS date FROM subscriptions"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_subscribers(flight_iata: str, date: str) -> list[dict]:
+    """Every chat subscribed to one (flight_iata, date), for fan-out."""
+    flight_iata = flight_iata.upper()
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT chat_id, name, dep_country, arr_country FROM subscriptions "
+            "WHERE flight_iata = ? AND scheduled_date = ? ORDER BY id",
+            (flight_iata, date),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def update_flight_countries(
-    flight_iata: str, dep_country: str, arr_country: str
+    chat_id: str, flight_iata: str, dep_country: str, arr_country: str
 ) -> None:
     flight_iata = flight_iata.upper()
     changed = False
@@ -137,15 +183,15 @@ def update_flight_countries(
         if dep_country != "Unknown":
             cur = conn.execute(
                 "UPDATE subscriptions SET dep_country = ? "
-                "WHERE flight_iata = ? AND dep_country = 'Unknown'",
-                (dep_country, flight_iata),
+                "WHERE chat_id = ? AND flight_iata = ? AND dep_country = 'Unknown'",
+                (dep_country, chat_id, flight_iata),
             )
             changed = changed or cur.rowcount > 0
         if arr_country != "Unknown":
             cur = conn.execute(
                 "UPDATE subscriptions SET arr_country = ? "
-                "WHERE flight_iata = ? AND arr_country = 'Unknown'",
-                (arr_country, flight_iata),
+                "WHERE chat_id = ? AND flight_iata = ? AND arr_country = 'Unknown'",
+                (arr_country, chat_id, flight_iata),
             )
             changed = changed or cur.rowcount > 0
 
@@ -372,4 +418,66 @@ def mark_usage_warned() -> None:
             "INSERT INTO usage_warnings (month, warned) VALUES (?, 1) "
             "ON CONFLICT(month) DO UPDATE SET warned = 1",
             (month,),
+        )
+
+
+# --- chats (per-chat access status + settings) ------------------------------
+
+
+def request_chat_access(chat_id: str) -> None:
+    """Records a pending access request, if this chat hasn't already been
+    decided (or already has a pending request) -- idempotent, so a chat
+    spamming /request_access doesn't reset an existing approval/denial."""
+    with _db() as conn:
+        conn.execute(
+            "INSERT INTO chats (chat_id, access_status, requested_at) "
+            "VALUES (?, 'pending', ?) "
+            "ON CONFLICT(chat_id) DO NOTHING",
+            (chat_id, datetime.now(timezone.utc).isoformat()),
+        )
+
+
+def get_chat_access_status(chat_id: str) -> str | None:
+    """None means this chat has never requested access at all (distinct from
+    'pending', which means it has and is waiting)."""
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT access_status FROM chats WHERE chat_id = ?", (chat_id,)
+        ).fetchone()
+    return row["access_status"] if row else None
+
+
+def set_chat_access_status(
+    chat_id: str, status: str, decided_by: str | None = None
+) -> None:
+    if status not in ("pending", "approved", "denied"):
+        raise ValueError(f"Invalid access status: {status!r}")
+    now = datetime.now(timezone.utc).isoformat()
+    with _db() as conn:
+        conn.execute(
+            "INSERT INTO chats (chat_id, access_status, requested_at, decided_at, decided_by) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(chat_id) DO UPDATE SET "
+            "access_status = excluded.access_status, decided_at = excluded.decided_at, "
+            "decided_by = excluded.decided_by",
+            (chat_id, status, now, now, decided_by),
+        )
+
+
+def get_chat_timezone(chat_id: str) -> str | None:
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT timezone FROM chats WHERE chat_id = ?", (chat_id,)
+        ).fetchone()
+    return row["timezone"] if row else None
+
+
+def set_chat_timezone(chat_id: str, tz_name: str) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    with _db() as conn:
+        conn.execute(
+            "INSERT INTO chats (chat_id, access_status, requested_at, timezone) "
+            "VALUES (?, 'pending', ?, ?) "
+            "ON CONFLICT(chat_id) DO UPDATE SET timezone = excluded.timezone",
+            (chat_id, now, tz_name),
         )
