@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -e ".[dev]"
+
+      - name: ruff check
+        run: ruff check .
+
+      - name: ruff format --check
+        run: ruff format --check .
+
+      - name: mypy --strict
+        # strict = true lives in pyproject.toml's [tool.mypy] -- passed here
+        # too for clarity that this check is deliberately strict, not
+        # relying on a reader to know that from config alone. Scoped to the
+        # production modules bot.py imports; test files aren't type-checked.
+        run: >
+          mypy --strict
+          bot.py access.py airports.py change_detection.py flight_api.py
+          healthcheck.py logging_config.py providers/ resilience.py
+          scheduler.py singleton.py storage/ timezones.py
+
+      - name: pytest
+        run: pytest -q
+
+  docker-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t family-flight-tracker:ci .
+
+      - name: Smoke-test the built image
+        run: |
+          docker run --rm --entrypoint id family-flight-tracker:ci
+          docker run --rm --entrypoint python family-flight-tracker:ci -c "import bot; print('bot imported OK')"
+          docker run --rm --entrypoint python family-flight-tracker:ci healthcheck.py; test $? -eq 1

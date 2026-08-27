@@ -26,6 +26,7 @@ dev = [
     "ruff==0.16.4",
     "mypy==2.3.1",
     "time-machine==3.5.0",
+    "types-requests==2.33.0.20260712",
 ]
 
 [tool.setuptools]
@@ -40,6 +41,7 @@ py-modules = [
     "resilience",
     "singleton",
     "logging_config",
+    "healthcheck",
 ]
 
 [tool.setuptools.packages.find]
@@ -59,9 +61,10 @@ target-version = "py312"
 
 [tool.mypy]
 python_version = "3.12"
-# Not yet `strict = true` project-wide: bot.py's handlers access
-# python-telegram-bot's Optional-typed Update/Context attributes
-# (update.message, update.effective_chat, ...) throughout without guards,
-# predating this hardening effort -- see PROGRESS.md's Phase 4/5 entries.
-# Fixing that is a real, scoped follow-up, not something to flip on here
-# and silently suppress with a blanket ignore.
+strict = true
+# Genuinely strict-clean as of Phase 7 (see PROGRESS.md) -- every production
+# module passes `mypy --strict` with no per-file ignores and no blanket
+# --ignore-missing-imports (types-requests, a dev dependency, covers the one
+# third-party package that needed stubs). Test files aren't included in CI's
+# mypy invocation or here; only bot.py and the plain modules/packages it
+# imports are checked.
