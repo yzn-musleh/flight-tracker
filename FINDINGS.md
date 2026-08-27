@@ -180,3 +180,37 @@ the correct chat-scoped behavior — including explicit cross-tenant isolation
 `/forget`, `/timezone`, and alert fan-out to multiple subscribed chats —
 lives in `tests/test_multi_tenant.py` and the updated
 `tests/test_alert_persistence.py`.
+
+## 7. Persisted `next_poll_at` (Phase 5): 3 tests
+
+**Phase:** 5 (resilience and the scheduler)
+
+**Tests:** `test_scheduler.py::test_is_due_respects_tier_interval_since_last_check`,
+`test_storage.py::test_flight_schedule_defaults_when_absent`,
+`test_storage.py::test_update_flight_schedule_merges_partial_fields`.
+
+**What they characterized:** `scheduler.is_due()` used to recompute the
+applicable tier interval from `last_checked` fresh on every call, using
+whatever "now" happened to be passed in at that moment. The two storage
+tests asserted `get_flight_schedule()`'s exact dict shape
+(`{last_checked, done, dep_scheduled, arr_scheduled}`).
+
+**Why they can't pass anymore:** `HARDENING_PLAN.md`'s Phase 5 scope is
+explicit: *"Replace the tick-based scheduler with a persisted `next_poll_at`
+per flight so restarts resume exactly where they left off."* This is a
+genuine algorithm change, not a refactor of the same logic:
+- `is_due()` now compares `now` against a `next_poll_at` timestamp computed
+  and stored *at the time of the previous check* (using the tier that
+  applied then), rather than re-deriving the interval from `last_checked`
+  using the tier that applies *now*. The frozen test sets up `sched` with
+  `last_checked` but no `next_poll_at` at all, so under the new logic
+  `next_poll_at` is `None` → "never scheduled" → always due, which
+  contradicts the test's expectation of `False` before the interval elapses.
+- `get_flight_schedule()`/`update_flight_schedule()` gained a `next_poll_at`
+  field (needed to persist the value above), so the two tests' exact-dict
+  equality assertions now see one extra key.
+
+**Disposition:** left failing, marked `xfail`. New coverage of the
+persisted-`next_poll_at` behavior (including the "resume exactly where left
+off across a restart" scenario the phase is named for) is in
+`tests/test_scheduler_next_poll_at.py`.

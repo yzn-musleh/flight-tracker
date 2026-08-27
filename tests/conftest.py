@@ -72,6 +72,14 @@ XFAIL_SUPERSEDED = {
     "tests/test_bot_alerts.py::test_country_backfill_when_unknown",
     "tests/test_bot_alerts.py::test_skips_flight_when_not_due",
     "tests/test_bot_alerts.py::test_usage_margin_gate_pauses_all_polling_and_warns_once",
+    # Phase 5: scheduler.is_due() now compares against a persisted
+    # next_poll_at instead of recomputing the tier interval from
+    # last_checked on every call; storage.get_flight_schedule/
+    # update_flight_schedule's dict shape grew a next_poll_at key to match.
+    # See FINDINGS.md #7.
+    "tests/test_scheduler.py::test_is_due_respects_tier_interval_since_last_check",
+    "tests/test_storage.py::test_flight_schedule_defaults_when_absent",
+    "tests/test_storage.py::test_update_flight_schedule_merges_partial_fields",
 }
 
 
