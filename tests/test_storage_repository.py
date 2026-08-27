@@ -26,6 +26,7 @@ def test_migrations_create_expected_tables():
         "change_events",
         "api_usage",
         "usage_warnings",
+        "chats",
         "schema_version",
     } <= tables
     # migration 2 drops the Phase 1 airports cache table -- Phase 2 resolves
@@ -38,7 +39,7 @@ def test_migrations_are_idempotent_across_connections():
         pass
     with storage._db() as conn:
         version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
-    assert version == 3
+    assert version == 4
 
 
 def test_wal_mode_is_enabled():
@@ -112,7 +113,7 @@ def test_increment_usage_records_provider_and_endpoint():
 
 
 def test_db_file_is_actually_sqlite(tmp_path):
-    storage.add_flight("Mom", "RJ264", "2026-08-05")  # forces DB creation
+    storage.add_flight("chat1", "Mom", "RJ264", "2026-08-05")  # forces DB creation
     conn = sqlite3.connect(storage.DB_PATH)
     tables = {
         r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")

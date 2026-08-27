@@ -14,10 +14,11 @@ def _write(tmp_path, name, data):
 
 def test_import_is_a_no_op_when_no_legacy_files_exist(tmp_path):
     importer.run(base_dir=str(tmp_path))
-    assert storage.load_flights() == []
+    assert storage.load_flights("legacy") == []
 
 
-def test_import_migrates_flights_state_schedule_usage_airports(tmp_path):
+def test_import_migrates_flights_state_schedule_usage_airports(tmp_path, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "999")  # pre-Phase-4 operator chat
     _write(
         tmp_path,
         "flights.json",
@@ -63,7 +64,7 @@ def test_import_migrates_flights_state_schedule_usage_airports(tmp_path):
 
     importer.run(base_dir=str(tmp_path))
 
-    flights = storage.load_flights()
+    flights = storage.load_flights("999")
     assert flights == [
         {
             "name": "Mom",
@@ -83,6 +84,9 @@ def test_import_migrates_flights_state_schedule_usage_airports(tmp_path):
     # resolves country/timezone from the bundled static/airports.csv instead)
     # but the file itself is still renamed like the others.
     assert os.path.exists(tmp_path / "airport_countries.json.imported")
+    # The pre-Phase-4 operator chat is auto-approved so upgrading doesn't
+    # lock them out of their own already-tracked flights.
+    assert storage.get_chat_access_status("999") == "approved"
 
 
 def test_import_renames_source_files_so_a_second_run_is_a_no_op(tmp_path):
@@ -94,7 +98,7 @@ def test_import_renames_source_files_so_a_second_run_is_a_no_op(tmp_path):
 
     # second run: nothing left to import, must not error or duplicate data
     importer.run(base_dir=str(tmp_path))
-    assert storage.load_flights() == []
+    assert storage.load_flights("legacy") == []
 
 
 def test_import_falls_back_to_unscoped_date_when_flight_number_is_ambiguous(tmp_path):
