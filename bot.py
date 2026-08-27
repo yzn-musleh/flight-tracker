@@ -1,14 +1,16 @@
-"""Telegram bot that tracks family flights to Jordan and alerts on status changes."""
+"""Telegram bot that tracks family flights and alerts on status changes."""
 
 import calendar
 import logging
 import os
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import BotCommand, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
+import access
 import airports
 import change_detection
 import flight_api
@@ -16,6 +18,7 @@ import providers
 import scheduler
 import storage
 import storage.importer
+import timezones
 
 load_dotenv()
 
@@ -25,8 +28,35 @@ log = logging.getLogger("flight_tracker")
 SCHEDULER_TICK_MINUTES = int(os.environ.get("SCHEDULER_TICK_MINUTES", "15"))
 MONTHLY_REQUEST_CAP = int(os.environ.get("MONTHLY_REQUEST_CAP", "100"))
 REQUEST_SAFETY_MARGIN = int(os.environ.get("REQUEST_SAFETY_MARGIN", "5"))
-CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")  # where alerts get pushed
 provider = providers.get_provider()
+
+
+async def _require_access(update: Update) -> bool:
+    """Gate for every data-touching command. chat_id is the tenant boundary
+    (CLAUDE.md invariant #5) -- an unapproved chat gets a message telling it
+    how to ask, not silence and not a peek at anyone's data."""
+    chat_id = str(update.effective_chat.id)
+    if access.is_approved(chat_id):
+        return True
+    if access.is_denied(chat_id):
+        await update.message.reply_text("Your access request was denied.")
+    else:
+        await update.message.reply_text(
+            "This chat isn't approved to use this bot yet. "
+            "Send /request_access to ask the operator."
+        )
+    return False
+
+
+async def _is_chat_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Private chats: the single user trivially controls their own chat.
+    Group chats: only Telegram admins/creators may run destructive
+    commands, so one member can't wipe everyone's tracked flights."""
+    chat = update.effective_chat
+    if chat.type == "private":
+        return True
+    member = await context.bot.get_chat_member(chat.id, update.effective_user.id)
+    return member.status in ("administrator", "creator")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -37,9 +67,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/status <flight_iata> - check a flight right now\n"
         "/add <name> <flight_iata> <YYYY-MM-DD> - track a new flight\n"
         "/remove <flight_iata> - stop tracking a flight\n"
-        "/budget - show remaining monthly API requests\n\n"
-        f"Your chat ID is {update.effective_chat.id} "
-        "(put this in TELEGRAM_CHAT_ID in your .env file to receive alerts here)."
+        "/budget - show remaining monthly API requests\n"
+        "/timezone <IANA name> - set the timezone flight times are shown in for this chat\n"
+        "/forget - delete all tracked flights and settings for this chat\n"
+        "/request_access - ask the operator to approve this chat\n\n"
+        f"Your chat ID is {update.effective_chat.id}."
     )
 
 
@@ -48,7 +80,9 @@ def _route_label(f: dict) -> str:
 
 
 async def list_flights(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    flights = storage.load_flights()
+    if not await _require_access(update):
+        return
+    flights = storage.load_flights(str(update.effective_chat.id))
     if not flights:
         await update.message.reply_text("No flights tracked yet. Use /add to add one.")
         return
@@ -66,13 +100,15 @@ async def list_flights(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def by_country(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_access(update):
+        return
     if not context.args:
         await update.message.reply_text("Usage: /bycountry <country name>")
         return
     query = " ".join(context.args).strip().lower()
     matches = [
         f
-        for f in storage.load_flights()
+        for f in storage.load_flights(str(update.effective_chat.id))
         if query in f.get("dep_country", "").lower()
         or query in f.get("arr_country", "").lower()
     ]
@@ -89,19 +125,26 @@ async def by_country(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_access(update):
+        return
     if not context.args:
         await update.message.reply_text("Usage: /status <flight_iata>")
         return
+    chat_id = str(update.effective_chat.id)
     flight_iata = context.args[0].upper()
     tracked = next(
-        (f for f in storage.load_flights() if f["flight_iata"] == flight_iata), None
+        (f for f in storage.load_flights(chat_id) if f["flight_iata"] == flight_iata),
+        None,
     )
     date = tracked["date"] if tracked else None
     name = tracked["name"] if tracked else flight_iata
     try:
         summary = provider.get_flight(flight_iata, date)
+        subscriber_tz = storage.get_chat_timezone(chat_id)
         await update.message.reply_text(
-            flight_api.format_message(name, flight_iata, summary)
+            flight_api.format_message(
+                name, flight_iata, summary, subscriber_tz=subscriber_tz
+            )
         )
     except flight_api.BudgetExhaustedError:
         await update.message.reply_text(
@@ -112,6 +155,8 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def budget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_access(update):
+        return
     usage = storage.load_usage()
     remaining = max(0, MONTHLY_REQUEST_CAP - usage["count"])
     now = datetime.now(timezone.utc)
@@ -123,6 +168,8 @@ async def budget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def add_flight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_access(update):
+        return
     if len(context.args) < 3:
         await update.message.reply_text(
             "Usage: /add <name> <flight_iata> <YYYY-MM-DD>\n"
@@ -147,56 +194,164 @@ async def add_flight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         # will backfill automatically once the periodic check finds live data.
         pass
 
-    storage.add_flight(name, flight_iata, date, dep_country, arr_country)
+    storage.add_flight(
+        str(update.effective_chat.id), name, flight_iata, date, dep_country, arr_country
+    )
     await update.message.reply_text(
         f"Now tracking {name} — {flight_iata} on {date} ({dep_country} → {arr_country})."
     )
 
 
 async def remove_flight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_access(update):
+        return
     if not context.args:
         await update.message.reply_text("Usage: /remove <flight_iata>")
         return
+    if not await _is_chat_admin(update, context):
+        await update.message.reply_text("Only group admins can do that.")
+        return
     flight_iata = context.args[0]
-    if storage.remove_flight(flight_iata):
+    if storage.remove_flight(str(update.effective_chat.id), flight_iata):
         await update.message.reply_text(f"Stopped tracking {flight_iata.upper()}.")
     else:
         await update.message.reply_text(f"{flight_iata.upper()} wasn't being tracked.")
 
 
-async def check_all_flights(context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not CHAT_ID:
+async def forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_access(update):
         return
+    if not await _is_chat_admin(update, context):
+        await update.message.reply_text("Only group admins can do that.")
+        return
+    count = storage.forget_chat(str(update.effective_chat.id))
+    await update.message.reply_text(
+        f"Forgot {count} tracked flight(s) and all settings for this chat."
+    )
 
+
+async def timezone_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _require_access(update):
+        return
+    chat_id = str(update.effective_chat.id)
+    if not context.args:
+        current = (
+            storage.get_chat_timezone(chat_id) or timezones.DEFAULT_SUBSCRIBER_TIMEZONE
+        )
+        await update.message.reply_text(
+            f"Current timezone: {current}\nUsage: /timezone <IANA timezone, e.g. Asia/Amman>"
+        )
+        return
+    tz_name = context.args[0]
+    try:
+        ZoneInfo(tz_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        await update.message.reply_text(
+            f"Unknown timezone: {tz_name}. Use an IANA name like Asia/Amman or America/New_York."
+        )
+        return
+    storage.set_chat_timezone(chat_id, tz_name)
+    await update.message.reply_text(f"Timezone set to {tz_name}.")
+
+
+async def request_access_cmd(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    chat_id = str(update.effective_chat.id)
+    result = access.request_access(chat_id)
+    if result == "approved":
+        await update.message.reply_text("This chat is already approved.")
+        return
+    if result == "denied":
+        await update.message.reply_text("Your access request was previously denied.")
+        return
+    await update.message.reply_text(
+        "Access request sent. You'll be notified once an operator approves it."
+    )
+    for admin_chat_id in access.ALLOWED_CHAT_IDS:
+        try:
+            await context.bot.send_message(
+                chat_id=admin_chat_id,
+                text=(
+                    f"Access request from chat {chat_id}.\n"
+                    f"Approve with /approve {chat_id} or deny with /deny {chat_id}."
+                ),
+            )
+        except Exception as e:  # noqa: BLE001 -- best-effort notify, one admin's failure shouldn't block the rest
+            log.warning(
+                "Couldn't notify admin chat %s of access request: %s", admin_chat_id, e
+            )
+
+
+async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = str(update.effective_chat.id)
+    if not access.is_admin(chat_id):
+        await update.message.reply_text("Only an operator can do that.")
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /approve <chat_id>")
+        return
+    target = context.args[0]
+    storage.set_chat_access_status(target, "approved", decided_by=chat_id)
+    await update.message.reply_text(f"Approved {target}.")
+    try:
+        await context.bot.send_message(
+            chat_id=target,
+            text="Your access request was approved. You can now use the bot.",
+        )
+    except Exception as e:  # noqa: BLE001 -- approval already recorded; a failed notify shouldn't undo it
+        log.warning("Couldn't notify chat %s of approval: %s", target, e)
+
+
+async def deny(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = str(update.effective_chat.id)
+    if not access.is_admin(chat_id):
+        await update.message.reply_text("Only an operator can do that.")
+        return
+    if not context.args:
+        await update.message.reply_text("Usage: /deny <chat_id>")
+        return
+    target = context.args[0]
+    storage.set_chat_access_status(target, "denied", decided_by=chat_id)
+    await update.message.reply_text(f"Denied {target}.")
+
+
+async def check_all_flights(context: ContextTypes.DEFAULT_TYPE) -> None:
     # Reserve REQUEST_SAFETY_MARGIN requests for manual /status calls — periodic
     # checks back off before the hard cap so a trip-day /status never gets refused.
     if storage.usage_remaining(MONTHLY_REQUEST_CAP) <= REQUEST_SAFETY_MARGIN:
         usage = storage.load_usage()
         if not usage.get("warned"):
             storage.mark_usage_warned()
-            await context.bot.send_message(
-                chat_id=CHAT_ID,
-                text=(
-                    "⚠️ Monthly Aviationstack request budget is nearly exhausted. "
-                    "Periodic checks are paused until it resets on the 1st "
-                    "(manual /status still works with the requests held in reserve)."
-                ),
-            )
+            for admin_chat_id in access.ALLOWED_CHAT_IDS:
+                try:
+                    await context.bot.send_message(
+                        chat_id=admin_chat_id,
+                        text=(
+                            "⚠️ Monthly Aviationstack request budget is nearly exhausted. "
+                            "Periodic checks are paused until it resets on the 1st "
+                            "(manual /status still works with the requests held in reserve)."
+                        ),
+                    )
+                except Exception as e:  # noqa: BLE001 -- best-effort notify, one admin's failure shouldn't block the rest
+                    log.warning(
+                        "Couldn't send budget warning to %s: %s", admin_chat_id, e
+                    )
         log.warning("Monthly budget near cap, pausing periodic checks.")
         return
 
-    flights = storage.load_flights()
+    flights = storage.load_distinct_tracked_flights()
     now = datetime.now(timezone.utc)
 
     for f in flights:
         flight_iata = f["flight_iata"]
-        flight_date = f.get("date")
+        flight_date: str = f["date"]
         sched = storage.get_flight_schedule(flight_iata, flight_date)
         if not scheduler.is_due(f, sched, now):
             continue
 
         try:
-            summary = provider.get_flight(flight_iata, f.get("date"))
+            summary = provider.get_flight(flight_iata, flight_date)
         except flight_api.BudgetExhaustedError as e:
             log.warning(
                 "Monthly budget exhausted mid-run, stopping periodic checks: %s", e
@@ -230,13 +385,19 @@ async def check_all_flights(context: ContextTypes.DEFAULT_TYPE) -> None:
                 "arr_estimated",
             )
         }
-        if (
-            f.get("dep_country", "Unknown") == "Unknown"
-            or f.get("arr_country", "Unknown") == "Unknown"
-        ):
-            dep_country = airports.get_country(summary.get("dep_iata"))
-            arr_country = airports.get_country(summary.get("arr_iata"))
-            storage.update_flight_countries(flight_iata, dep_country, arr_country)
+
+        # Poll the flight once; fan out to every chat subscribed to it.
+        subscribers = storage.get_subscribers(flight_iata, flight_date)
+        for sub in subscribers:
+            if (
+                sub.get("dep_country", "Unknown") == "Unknown"
+                or sub.get("arr_country", "Unknown") == "Unknown"
+            ):
+                dep_country = airports.get_country(summary.get("dep_iata"))
+                arr_country = airports.get_country(summary.get("arr_iata"))
+                storage.update_flight_countries(
+                    sub["chat_id"], flight_iata, dep_country, arr_country
+                )
 
         previous = storage.get_flight_state(flight_iata, flight_date)
 
@@ -264,12 +425,35 @@ async def check_all_flights(context: ContextTypes.DEFAULT_TYPE) -> None:
         # sent before the send is attempted, with reconciliation after").
         pending = storage.get_pending_changes(flight_iata, flight_date)
         if pending:
-            text = change_detection.format_alert_message(
-                f["name"], flight_iata, pending, summary
-            )
-            await context.bot.send_message(chat_id=CHAT_ID, text=text)
+            for sub in subscribers:
+                subscriber_tz = storage.get_chat_timezone(sub["chat_id"])
+                text = change_detection.format_alert_message(
+                    sub["name"],
+                    flight_iata,
+                    pending,
+                    summary,
+                    subscriber_tz=subscriber_tz,
+                )
+                await context.bot.send_message(chat_id=sub["chat_id"], text=text)
             storage.mark_changes_sent([p["id"] for p in pending])
         log.info("Recorded state for %s", flight_iata)
+
+
+async def _post_init(app: Application) -> None:
+    await app.bot.set_my_commands(
+        [
+            BotCommand("start", "Show help"),
+            BotCommand("list", "List tracked flights"),
+            BotCommand("bycountry", "Filter tracked flights by country"),
+            BotCommand("status", "Check a flight right now"),
+            BotCommand("add", "Track a new flight"),
+            BotCommand("remove", "Stop tracking a flight"),
+            BotCommand("budget", "Show remaining monthly API requests"),
+            BotCommand("timezone", "Set this chat's display timezone"),
+            BotCommand("forget", "Delete all data for this chat"),
+            BotCommand("request_access", "Ask the operator to approve this chat"),
+        ]
+    )
 
 
 def main() -> None:
@@ -279,7 +463,7 @@ def main() -> None:
 
     storage.importer.run()
 
-    app = Application.builder().token(token).build()
+    app = Application.builder().token(token).post_init(_post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("list", list_flights))
     app.add_handler(CommandHandler("bycountry", by_country))
@@ -287,6 +471,11 @@ def main() -> None:
     app.add_handler(CommandHandler("add", add_flight))
     app.add_handler(CommandHandler("remove", remove_flight))
     app.add_handler(CommandHandler("budget", budget))
+    app.add_handler(CommandHandler("timezone", timezone_cmd))
+    app.add_handler(CommandHandler("forget", forget))
+    app.add_handler(CommandHandler("request_access", request_access_cmd))
+    app.add_handler(CommandHandler("approve", approve))
+    app.add_handler(CommandHandler("deny", deny))
 
     if app.job_queue:
         app.job_queue.run_repeating(
