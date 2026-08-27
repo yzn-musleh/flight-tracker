@@ -2,7 +2,7 @@
 breaker, and Telegram RetryAfter handling in isolation -- no real sleeping,
 no real network, no real Telegram client."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -117,7 +117,7 @@ def test_circuit_half_opens_after_cooldown():
     breaker = resilience.CircuitBreaker(
         name="test", failure_threshold=1, cooldown_seconds=30
     )
-    now = datetime(2026, 8, 5, tzinfo=timezone.utc)
+    now = datetime(2026, 8, 5, tzinfo=UTC)
     breaker.record_failure(now=now)
 
     with pytest.raises(resilience.CircuitOpenError):

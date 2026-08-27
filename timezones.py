@@ -14,7 +14,7 @@ the *default* is global for now.
 """
 
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 DEFAULT_SUBSCRIBER_TIMEZONE = os.environ.get("SUBSCRIBER_TIMEZONE", "UTC")
@@ -22,11 +22,11 @@ DEFAULT_SUBSCRIBER_TIMEZONE = os.environ.get("SUBSCRIBER_TIMEZONE", "UTC")
 
 def _parse_utc(iso_str: str) -> datetime | None:
     try:
-        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(iso_str)
     except (ValueError, AttributeError):
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
     return dt
 
 
@@ -37,7 +37,7 @@ def _format_in(dt: datetime, tz_name: str) -> tuple[str, str]:
         local = dt.astimezone(ZoneInfo(tz_name))
         used = tz_name
     except (ZoneInfoNotFoundError, ValueError):
-        local = dt.astimezone(timezone.utc)
+        local = dt.astimezone(UTC)
         used = "UTC"
     return local.strftime("%Y-%m-%d %H:%M"), used
 

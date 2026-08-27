@@ -38,7 +38,7 @@ def test_release_is_a_no_op_if_no_lock_exists(tmp_path):
     sys.platform == "win32",
     reason=(
         "os.kill(pid, 0) for a nonexistent pid raises a generic OSError on "
-        "Windows (WinError 87), not ProcessLookupError, so _pid_is_running "
+        "Windows (WinError 87), not ProcessLookupError, so pid_is_running "
         "conservatively assumes 'still running' there -- see singleton.py's "
         "docstring. Stale-lock reclaim is verified precisely on POSIX, the "
         "actual Docker/Linux deployment target (Phase 6)."

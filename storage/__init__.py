@@ -24,7 +24,7 @@ scope:
 import os
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from threading import Lock
 
 from . import migrations
@@ -124,7 +124,7 @@ def add_flight(
                 date,
                 dep_country,
                 arr_country,
-                datetime.now(timezone.utc).isoformat(),
+                datetime.now(UTC).isoformat(),
             ),
         )
 
@@ -332,7 +332,7 @@ def record_pending_change(
                 field,
                 old_str,
                 new_str,
-                datetime.now(timezone.utc).isoformat(),
+                datetime.now(UTC).isoformat(),
             ),
         )
         return True
@@ -378,7 +378,7 @@ def load_state() -> dict:
 
 
 def _current_month() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m")
+    return datetime.now(UTC).strftime("%Y-%m")
 
 
 def load_usage() -> dict:
@@ -407,7 +407,7 @@ def increment_usage(
         conn.execute(
             "INSERT INTO api_usage (provider, timestamp, endpoint, http_status, counted) "
             "VALUES (?, ?, ?, ?, 1)",
-            (provider, datetime.now(timezone.utc).isoformat(), endpoint, http_status),
+            (provider, datetime.now(UTC).isoformat(), endpoint, http_status),
         )
     return load_usage()["count"]
 
@@ -438,7 +438,7 @@ def request_chat_access(chat_id: str) -> None:
             "INSERT INTO chats (chat_id, access_status, requested_at) "
             "VALUES (?, 'pending', ?) "
             "ON CONFLICT(chat_id) DO NOTHING",
-            (chat_id, datetime.now(timezone.utc).isoformat()),
+            (chat_id, datetime.now(UTC).isoformat()),
         )
 
 
@@ -457,7 +457,7 @@ def set_chat_access_status(
 ) -> None:
     if status not in ("pending", "approved", "denied"):
         raise ValueError(f"Invalid access status: {status!r}")
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     with _db() as conn:
         conn.execute(
             "INSERT INTO chats (chat_id, access_status, requested_at, decided_at, decided_by) "
@@ -478,7 +478,7 @@ def get_chat_timezone(chat_id: str) -> str | None:
 
 
 def set_chat_timezone(chat_id: str, tz_name: str) -> None:
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     with _db() as conn:
         conn.execute(
             "INSERT INTO chats (chat_id, access_status, requested_at, timezone) "

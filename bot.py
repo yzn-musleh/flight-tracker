@@ -4,7 +4,7 @@ import calendar
 import logging
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
@@ -163,7 +163,7 @@ async def budget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     usage = storage.load_usage()
     remaining = max(0, MONTHLY_REQUEST_CAP - usage["count"])
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     days_left = calendar.monthrange(now.year, now.month)[1] - now.day
     await update.message.reply_text(
         f"Used {usage['count']}/{MONTHLY_REQUEST_CAP} Aviationstack requests this month "
@@ -357,7 +357,7 @@ async def check_all_flights(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     flights = storage.load_distinct_tracked_flights()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     for f in flights:
         flight_iata = f["flight_iata"]
@@ -480,10 +480,33 @@ async def _post_init(app: Application) -> None:
     )
 
 
+def _webhook_config() -> dict | None:
+    """Returns run_webhook() kwargs if WEBHOOK_MODE is enabled, else None
+    (meaning: use run_polling()). Kept separate from main() so the config
+    decision is testable without actually starting a server. Fits a
+    reverse-proxy/tunnel setup that terminates TLS externally (e.g.
+    Cloudflare Tunnel) and forwards plain HTTP to this process -- the bot
+    itself never needs a certificate."""
+    if os.environ.get("WEBHOOK_MODE", "false").lower() not in ("1", "true", "yes"):
+        return None
+    webhook_url = os.environ.get("WEBHOOK_URL")
+    if not webhook_url:
+        raise SystemExit("WEBHOOK_MODE is enabled but WEBHOOK_URL is not set.")
+    path = os.environ.get("WEBHOOK_PATH", "/telegram-webhook")
+    return {
+        "listen": os.environ.get("WEBHOOK_LISTEN", "0.0.0.0"),
+        "port": int(os.environ.get("WEBHOOK_PORT", "8443")),
+        "url_path": path,
+        "webhook_url": f"{webhook_url.rstrip('/')}/{path.lstrip('/')}",
+    }
+
+
 def main() -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
         raise SystemExit("Set TELEGRAM_BOT_TOKEN in your .env file first.")
+
+    webhook_kwargs = _webhook_config()
 
     try:
         singleton.acquire()
@@ -516,12 +539,16 @@ def main() -> None:
             "Bot starting, scheduler tick every %s minutes (flights only polled inside their active window).",
             SCHEDULER_TICK_MINUTES,
         )
-        # run_polling() installs SIGINT/SIGTERM/SIGABRT handlers by default
-        # on non-Windows platforms (verified against the installed
-        # python-telegram-bot's own docstring) and drains in-flight work
-        # before exiting -- graceful shutdown on the actual deployment
+        # Both run_polling() and run_webhook() install SIGINT/SIGTERM/SIGABRT
+        # handlers by default on non-Windows platforms (verified against the
+        # installed python-telegram-bot's own docstring) and drain in-flight
+        # work before exiting -- graceful shutdown on the actual deployment
         # target (Docker/Linux, Phase 6) needs nothing further here.
-        app.run_polling()
+        if webhook_kwargs:
+            log.info("Webhook mode: listening on %s", webhook_kwargs)
+            app.run_webhook(**webhook_kwargs)
+        else:
+            app.run_polling()
     finally:
         singleton.release()
 

@@ -16,7 +16,7 @@ class AlreadyRunningError(Exception):
     pass
 
 
-def _pid_is_running(pid: int) -> bool:
+def pid_is_running(pid: int) -> bool:
     """Best-effort liveness check. Reliable on POSIX (os.kill(pid, 0) raises
     ProcessLookupError/OSError if the pid is gone, without actually sending a
     signal). Python's os.kill on Windows doesn't support signal 0 the same
@@ -46,7 +46,7 @@ def acquire(path: str | None = None) -> None:
                 old_pid = int(f.read().strip())
         except (ValueError, OSError):
             pass
-        if old_pid is not None and _pid_is_running(old_pid):
+        if old_pid is not None and pid_is_running(old_pid):
             raise AlreadyRunningError(
                 f"Another instance appears to already be running "
                 f"(pid {old_pid}, lock file {path})."

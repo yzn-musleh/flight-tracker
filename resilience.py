@@ -12,7 +12,7 @@ import logging
 import random
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from telegram.error import RetryAfter
 
@@ -46,7 +46,7 @@ class CircuitBreaker:
     def before_call(self, now: datetime | None = None) -> None:
         if self._opened_at is None:
             return
-        now = now or datetime.now(timezone.utc)
+        now = now or datetime.now(UTC)
         if now - self._opened_at < timedelta(seconds=self.cooldown_seconds):
             raise CircuitOpenError(
                 f"Circuit breaker '{self.name}' is open "
@@ -67,7 +67,7 @@ class CircuitBreaker:
     def record_failure(self, now: datetime | None = None) -> None:
         self._consecutive_failures += 1
         if self._consecutive_failures >= self.failure_threshold:
-            self._opened_at = now or datetime.now(timezone.utc)
+            self._opened_at = now or datetime.now(UTC)
             log.warning(
                 "Circuit breaker %s opened after %d consecutive failures",
                 self.name,
