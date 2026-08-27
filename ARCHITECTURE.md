@@ -98,6 +98,15 @@ still going, and `CHANGELOG.md`/`PROGRESS.md` for the phase-by-phase history.
   mode: `bot._webhook_config()` (a pure, independently-testable function)
   selects `run_webhook()` vs `run_polling()` from `WEBHOOK_MODE`/`WEBHOOK_URL`/
   `WEBHOOK_PATH`/`WEBHOOK_LISTEN`/`WEBHOOK_PORT`.
+- **Phase 7**: scanned the full git history for secrets/personal data first
+  (see `FINDINGS.md`/`HANDOFF.md` — nothing required changing). Brought the
+  entire codebase to genuine `mypy --strict` compliance (`bot.py`'s handlers
+  now `assert` the PTB-guaranteed non-Optional fields they use; every other
+  module's `dict`/`list` generics and return-type annotations filled in) —
+  `pyproject.toml`'s `[tool.mypy]` now says `strict = true` truthfully.
+  Added `LICENSE`, `CONTRIBUTING.md`, GitHub issue/PR templates, and
+  `.github/workflows/ci.yml` (ruff, mypy --strict, pytest, and a Docker
+  build+smoke-test on every PR). Rewrote `README.md` for a stranger.
 
 ## Modules
 

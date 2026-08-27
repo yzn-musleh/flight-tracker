@@ -5,6 +5,41 @@ All notable changes to this project are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Phase 7 — Publishable
+- **Scanned the full git history for committed secrets or personal data
+  before making any other change**, per this phase's explicit instruction.
+  No real API keys, tokens, or `.env` files were ever committed. Two
+  pre-existing (present since the very first commit, not introduced during
+  hardening) items worth the repo owner's attention before making the repo
+  public: a first name ("Uncle_Khalid") used as an example in the original
+  README, and a real-looking domain in `HARDENING_PLAN.md`'s own Phase 6
+  note. Reported, not changed — see `HANDOFF.md`.
+- **Achieved genuine `mypy --strict` compliance across the entire
+  codebase** (not just `bot.py`'s previously-known Optional-access gap —
+  every module had missing generic type arguments, missing return-type
+  annotations, or similar). Zero behavior change throughout, verified by
+  the full test suite passing unmodified at every step.
+- Added `LICENSE` (MIT; `static/airports.csv` called out as separately
+  ODbL-licensed), `CONTRIBUTING.md`, `.github/ISSUE_TEMPLATE/`,
+  `.github/PULL_REQUEST_TEMPLATE.md`.
+- Added `.github/workflows/ci.yml`: `ruff check`, `ruff format --check`,
+  `mypy --strict`, and `pytest` on every PR and push to `main`, plus a
+  separate job that builds the Docker image and runs the same non-root/
+  import/healthcheck smoke checks verified manually in Phase 6 — verified
+  by actually running the exact commands the workflow uses, not just
+  writing YAML and assuming it works.
+- Added `types-requests` as a dev dependency (the one third-party package
+  needing stubs for a clean strict run with no blanket
+  `--ignore-missing-imports`); set `strict = true` in `pyproject.toml`'s
+  `[tool.mypy]` now that it's actually true.
+- Rewrote `README.md` for a stranger: what it does, quickstart, a full
+  configuration reference table, a troubleshooting section, and a pointer
+  to the provider comparison — screenshots deliberately omitted with an
+  explanation (see the README's own placeholder comment) rather than
+  fabricated.
+- No new Phase 0 test breakage — this phase's changes were type
+  annotations, docs, and CI/packaging config, not behavior changes.
+
 ### Phase 6 — Packaging and deployment
 - Added `pyproject.toml`: project metadata, a `dev` extra
   (pytest/pytest-asyncio/ruff/mypy/time-machine, pinned to the exact

@@ -1,5 +1,102 @@
 # Progress Log
 
+## Phase 7 — Publishable
+
+**What I did**
+- Branched `harden/phase-7-publishable` from Phase 6's tip.
+- **Scanned the full git history first**, per this phase's explicit
+  instruction to report before changing anything: searched every commit's
+  diff for Telegram-bot-token-shaped strings, `access_key=`-shaped API key
+  patterns, a committed `.env` file, real `TELEGRAM_CHAT_ID` values, and
+  email/phone-shaped strings. Found: no real secrets ever committed (only
+  `.env.example` placeholders); the repo author's own email appears in
+  every commit's authorship metadata (normal git behavior, not a leak);
+  two pre-existing items from the very first ("Baseline") commit worth
+  flagging for the repo owner — a first name in README's original example
+  text, and a real-looking domain in `HARDENING_PLAN.md`'s own Phase 6
+  planning note. Did not touch either (reporting only, and git history
+  must never be rewritten regardless).
+- Discovered mid-phase that Phase 7's own CI requirement ("mypy --strict"
+  on every PR) would fail immediately — ran `mypy --strict` against the
+  whole codebase for the first time and found ~100 errors across nearly
+  every module, not the ~50 `bot.py`-only Optional-access errors I'd been
+  tracking as a known gap since Phase 4. Fixed all of them rather than
+  scoping CI's mypy step down to something weaker than what the plan
+  actually asks for.
+- Added `LICENSE`, `CONTRIBUTING.md`, GitHub issue/PR templates, and
+  `.github/workflows/ci.yml`.
+- Rewrote `README.md` for a stranger.
+
+**What I decided and why**
+- **Fixed the full `mypy --strict` gap rather than weakening the CI
+  requirement.** I considered three options: run `mypy --strict` and ship
+  known-red CI, run plain `mypy` in CI and quietly not do what the plan
+  asked, or actually fix it. Given the explicit ask ("a GitHub Actions
+  workflow running ruff, mypy --strict, pytest...") and that nothing about
+  the fix was blocked (it was large, not hard, and entirely mechanical —
+  missing generic type arguments, missing return annotations, a handful of
+  `assert`s in `bot.py`), shipping broken or quietly-downgraded CI on a
+  repo whose whole point is "publishable" felt like exactly the kind of
+  corner this hardening effort exists to not cut. Full accounting of what
+  changed is in the Phase 7 commit for it; the short version is zero
+  behavior change, confirmed by the passing test suite at every step.
+- **`assert update.message is not None` (etc.) rather than `if` guards with
+  early returns, or restructuring handlers to take a narrower type.** Every
+  one of these handlers is only ever invoked by `CommandHandler` for a
+  `Message` update, which Telegram/PTB guarantees has `.message`,
+  `.effective_chat` set (and `.effective_user` for a real user's message,
+  used only in the group-admin check). An `assert` documents a real,
+  always-true invariant at zero runtime cost when it holds, and gives a
+  loud, honest failure (not a silent `None`-shaped bug) in the
+  practically-impossible case it doesn't. Adding a defensive `if
+  update.message is None: return` instead would silently swallow a case
+  that should never happen and, if it somehow did, hide a real bug behind
+  a no-op.
+- **Replaced three lambda-with-default-arg closures with typed nested
+  `async def` functions, not bare lambdas.** My first attempt at fixing
+  mypy's "cannot infer type of lambda" error was to drop the
+  `x=x`-style default-argument closures on the reasoning that each lambda
+  is awaited within the same loop iteration it's created in, so the classic
+  "closure captures the loop variable by reference, all of them see the
+  last value" bug can't actually happen here. That's true *today*, but
+  `ruff`'s `B023` correctly flagged the bare-lambda version anyway — it's
+  right that this is a real footgun if the code is ever changed to fire
+  sends concurrently instead of sequentially, and "true today, fragile
+  tomorrow" isn't a bar this project should accept just to satisfy a type
+  checker. A typed nested function keeps the exact same default-argument
+  capture (still safe against that future change) while giving mypy an
+  annotated parameter to infer from, which a lambda syntactically can't
+  provide.
+- **CI's Docker job re-runs the exact manual smoke checks from Phase 6**
+  (non-root user, clean `import bot`, healthcheck exit code) rather than
+  just `docker build` with no follow-up — a Dockerfile that merely builds
+  can still be broken in ways that only show up when you actually run it,
+  which is exactly what Phase 6's manual verification caught that a bare
+  build wouldn't have.
+- **Screenshots deliberately omitted from the README, not faked.** I have
+  no way to produce a real screenshot of this bot's Telegram output without
+  either fabricating a fake conversation (against this project's own "don't
+  invent things that look real" ethos, and the broader instruction to never
+  fabricate content that could pass as genuine) or actually running a live
+  bot against a real Telegram chat (out of scope, needs real credentials).
+  Left an explicit HTML-comment placeholder in the README explaining this
+  and inviting the repo owner to add a real one, rather than silently
+  dropping the request or shipping a fake image.
+
+**What I deliberately did not do**
+- Did not act on either git-history finding (the example name, the domain
+  in `HARDENING_PLAN.md`) beyond reporting them — that's a call for the
+  repo owner, not something to unilaterally redact, and git history must
+  never be rewritten regardless of what's found in it.
+- Did not add a CODEOWNERS file, branch protection rules, or a release/tag
+  workflow — none of those were asked for, and inventing process for a
+  single-maintainer personal project isn't "publishable," it's scope creep.
+- Did not add real screenshots — see above.
+- Did not type-check the `tests/` directory in CI's `mypy --strict` step —
+  test files were never brought to strict compliance and doing so now
+  would be a large, low-value effort (test code benefits far less from
+  strict typing than the production modules it exercises).
+
 ## Phase 6 — Packaging and deployment
 
 **What I did**
