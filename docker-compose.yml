@@ -1,0 +1,20 @@
+services:
+  flight-tracker:
+    build: .
+    image: family-flight-tracker:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Named volume, not a bind mount: the SQLite file (WAL mode) and the
+      # single-instance lock file both live here, surviving a container
+      # recreate/image rebuild. DB_PATH/LOCK_PATH in the image already point
+      # at /data (see Dockerfile) so no override is needed here.
+      - flight-tracker-data:/data
+    ports:
+      # Only meaningful when WEBHOOK_MODE=true in .env; harmless (unused) in
+      # the default long-polling mode. Match WEBHOOK_PORT if you change it.
+      - "8443:8443"
+
+volumes:
+  flight-tracker-data:

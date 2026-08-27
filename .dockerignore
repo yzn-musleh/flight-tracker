@@ -1,0 +1,26 @@
+.env
+*.db
+*.db-wal
+*.db-shm
+*.lock
+*.json
+*.json.imported
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.git/
+.github/
+tests/
+docs/
+# Root-level docs only -- static/AIRPORTS_LICENSE.md is kept in the image:
+# ODbL requires the license to travel with the bundled airports.csv data,
+# including in a "Derivative Database" (which a Docker image containing it
+# arguably is), so excluding it here isn't worth the ambiguity.
+/*.md
+/HANDOFF.md
+/BLOCKED.md
+/FINDINGS.md
+/PROGRESS.md

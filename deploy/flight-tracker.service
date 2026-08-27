@@ -1,0 +1,39 @@
+[Unit]
+Description=Family Flight Tracker Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust these two paths and the user for your install; the rest of the
+# defaults (DB_PATH, LOCK_PATH, ALLOWED_CHAT_IDS, ...) live in .env in the
+# WorkingDirectory below, loaded the same way as running `python bot.py`
+# directly -- systemd doesn't need to know about them.
+User=flighttracker
+WorkingDirectory=/opt/flight-tracker
+ExecStart=/opt/flight-tracker/.venv/bin/python /opt/flight-tracker/bot.py
+
+# Graceful shutdown: python-telegram-bot's Application.run_polling()/
+# run_webhook() install a SIGTERM handler by default (verified against the
+# installed library) and drain in-flight work before exiting -- systemd's
+# default TERM-then-KILL behavior on stop is exactly what that expects.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+Restart=on-failure
+RestartSec=5
+
+# Defense in depth beyond this project's own single-instance lock
+# (singleton.py) -- systemd won't even attempt a second concurrent start.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Light sandboxing. Not a substitute for running as a dedicated
+# non-root `flighttracker` user (set above) -- both apply together.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/flight-tracker
+
+[Install]
+WantedBy=multi-user.target
