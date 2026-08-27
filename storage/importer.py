@@ -32,6 +32,7 @@ manually; there's no admin tool yet to reassign a subscription's chat_id.
 import json
 import logging
 import os
+from typing import Any
 
 from . import (
     add_flight,
@@ -49,7 +50,7 @@ USAGE_FILE = "usage.json"
 AIRPORT_CACHE_FILE = "airport_countries.json"
 
 
-def _load_json(path: str, default):
+def _load_json(path: str, default: Any) -> Any:
     if not os.path.exists(path):
         return default
     with open(path, encoding="utf-8") as f:
@@ -61,7 +62,7 @@ def _mark_imported(path: str) -> None:
         os.rename(path, path + ".imported")
 
 
-def _single_date_for(flight_iata: str, flights: list[dict]) -> str:
+def _single_date_for(flight_iata: str, flights: list[dict[str, Any]]) -> str:
     dates = {
         f["date"] for f in flights if f["flight_iata"].upper() == flight_iata.upper()
     }

@@ -55,7 +55,7 @@ def configure(level: int = logging.INFO) -> None:
 
 def with_correlation_id(
     logger: logging.Logger, correlation_id: str
-) -> logging.LoggerAdapter:
+) -> logging.LoggerAdapter[logging.Logger]:
     """A per-poll-cycle logger (CLAUDE.md: "a correlation id per poll
     cycle") -- every message logged through the adapter carries
     correlation_id without each call site needing to pass extra= itself."""

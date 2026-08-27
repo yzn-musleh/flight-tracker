@@ -6,6 +6,8 @@ transaction. Safe to call on every connection -- the common case (already at
 the latest version) is a single cheap SELECT.
 """
 
+import sqlite3
+
 MIGRATIONS: list[tuple[int, str]] = [
     (
         1,
@@ -150,7 +152,7 @@ MIGRATIONS: list[tuple[int, str]] = [
 ]
 
 
-def apply(conn) -> None:
+def apply(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)")
     row = conn.execute("SELECT version FROM schema_version").fetchone()
     if row is None:

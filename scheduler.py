@@ -19,7 +19,7 @@ def _env_float(name: str, default: float) -> float:
     return float(os.environ.get(name, default))
 
 
-def _parse_iso(value):
+def _parse_iso(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
@@ -34,12 +34,12 @@ def mark_done(summary: Mapping[str, Any]) -> bool:
         return False
     if (summary.get("status") or "").lower() in TERMINAL_STATUSES:
         return True
-    if summary.get("arr_actual"):
-        return True
-    return False
+    return bool(summary.get("arr_actual"))
 
 
-def is_active_window(flight: dict, sched: dict, now: datetime) -> bool:
+def is_active_window(
+    flight: dict[str, Any], sched: dict[str, Any], now: datetime
+) -> bool:
     if sched.get("done"):
         return False
 
@@ -59,7 +59,9 @@ def is_active_window(flight: dict, sched: dict, now: datetime) -> bool:
     return window_start <= now <= window_end
 
 
-def tier_interval_minutes(flight: dict, sched: dict, now: datetime) -> int:
+def tier_interval_minutes(
+    flight: dict[str, Any], sched: dict[str, Any], now: datetime
+) -> int:
     """How often (minutes) to poll, given we're already inside the active window."""
     close_hours = _env_float("CLOSE_EVENT_HOURS", 3)
     close_interval = int(os.environ.get("CHECK_INTERVAL_MINUTES", "30"))
@@ -77,7 +79,9 @@ def tier_interval_minutes(flight: dict, sched: dict, now: datetime) -> int:
     return close_interval if nearest_gap_hours <= close_hours else far_interval
 
 
-def compute_next_poll_at(flight: dict, sched: dict, now: datetime) -> str:
+def compute_next_poll_at(
+    flight: dict[str, Any], sched: dict[str, Any], now: datetime
+) -> str:
     """The persisted due-time for a flight's *next* check, fixed at the
     moment of the check that computes it (using the tier that applies as of
     `now`) rather than recomputed from scratch on every later tick. Storing
@@ -89,7 +93,7 @@ def compute_next_poll_at(flight: dict, sched: dict, now: datetime) -> str:
     return (now + interval).isoformat()
 
 
-def is_due(flight: dict, sched: dict, now: datetime) -> bool:
+def is_due(flight: dict[str, Any], sched: dict[str, Any], now: datetime) -> bool:
     if not is_active_window(flight, sched, now):
         return False
 

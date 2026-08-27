@@ -27,7 +27,9 @@ class BudgetExhaustedError(FlightLookupError):
     """Raised when the monthly Aviationstack request budget is used up."""
 
 
-def get_flight_status(flight_iata: str, flight_date: str = None) -> dict:
+def get_flight_status(
+    flight_iata: str, flight_date: str | None = None
+) -> dict[str, Any]:
     """Fetch the current status for a flight number.
 
     flight_iata: e.g. "RJ264"
@@ -53,7 +55,7 @@ def get_flight_status(flight_iata: str, flight_date: str = None) -> dict:
     if flight_date:
         params["flight_date"] = flight_date
 
-    def _attempt():
+    def _attempt() -> requests.Response:
         # Each real attempt is a real request against Aviationstack's own
         # quota, retries included -- counted individually so our local
         # accounting can't undercount what actually happened server-side.
@@ -87,12 +89,12 @@ def get_flight_status(flight_iata: str, flight_date: str = None) -> dict:
             f"Aviationstack returned HTTP {resp.status_code}"
         ) from e
 
-    payload = resp.json()
+    payload: dict[str, Any] = resp.json()
 
     if "error" in payload:
         raise FlightLookupError(payload["error"].get("message", "Unknown API error"))
 
-    data = payload.get("data") or []
+    data: list[dict[str, Any]] = payload.get("data") or []
     if not data:
         raise FlightLookupError(
             f"No flight found for {flight_iata}"
@@ -102,7 +104,7 @@ def get_flight_status(flight_iata: str, flight_date: str = None) -> dict:
     return data[0]
 
 
-def summarize(flight: dict) -> dict:
+def summarize(flight: Mapping[str, Any]) -> dict[str, Any]:
     """Extract the fields we care about for comparison/display."""
     dep = flight.get("departure") or {}
     arr = flight.get("arrival") or {}

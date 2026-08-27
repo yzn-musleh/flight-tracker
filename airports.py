@@ -12,10 +12,10 @@ import csv
 import os
 
 _DATA_PATH = os.path.join(os.path.dirname(__file__), "static", "airports.csv")
-_by_iata: dict[str, dict] | None = None
+_by_iata: dict[str, dict[str, str]] | None = None
 
 
-def _load() -> dict[str, dict]:
+def _load() -> dict[str, dict[str, str]]:
     global _by_iata
     if _by_iata is None:
         by_iata = {}

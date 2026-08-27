@@ -5,6 +5,7 @@ import logging
 import os
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
@@ -39,6 +40,12 @@ async def _require_access(update: Update) -> bool:
     """Gate for every data-touching command. chat_id is the tenant boundary
     (CLAUDE.md invariant #5) -- an unapproved chat gets a message telling it
     how to ask, not silence and not a peek at anyone's data."""
+    # CommandHandler only ever calls a handler for a Message update, which
+    # always has .message and .effective_chat set -- true by construction,
+    # not just hoped for, so asserting it (rather than silently handling a
+    # case that can't occur) is what lets every access below be non-Optional.
+    assert update.message is not None
+    assert update.effective_chat is not None
     chat_id = str(update.effective_chat.id)
     if access.is_approved(chat_id):
         return True
@@ -56,6 +63,8 @@ async def _is_chat_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """Private chats: the single user trivially controls their own chat.
     Group chats: only Telegram admins/creators may run destructive
     commands, so one member can't wipe everyone's tracked flights."""
+    assert update.effective_chat is not None
+    assert update.effective_user is not None
     chat = update.effective_chat
     if chat.type == "private":
         return True
@@ -64,6 +73,8 @@ async def _is_chat_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    assert update.message is not None
+    assert update.effective_chat is not None
     await update.message.reply_text(
         "Flight tracker bot is running.\n"
         "/list - show tracked flights, grouped by departure → arrival country\n"
@@ -79,11 +90,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-def _route_label(f: dict) -> str:
+def _route_label(f: dict[str, Any]) -> str:
     return f"{f.get('dep_country', 'Unknown')} → {f.get('arr_country', 'Unknown')}"
 
 
 async def list_flights(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    assert update.message is not None
+    assert update.effective_chat is not None
     if not await _require_access(update):
         return
     flights = storage.load_flights(str(update.effective_chat.id))
@@ -91,7 +104,7 @@ async def list_flights(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("No flights tracked yet. Use /add to add one.")
         return
 
-    groups: dict[str, list] = {}
+    groups: dict[str, list[dict[str, Any]]] = {}
     for f in flights:
         groups.setdefault(_route_label(f), []).append(f)
 
@@ -104,6 +117,8 @@ async def list_flights(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def by_country(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    assert update.message is not None
+    assert update.effective_chat is not None
     if not await _require_access(update):
         return
     if not context.args:
@@ -129,6 +144,8 @@ async def by_country(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    assert update.message is not None
+    assert update.effective_chat is not None
     if not await _require_access(update):
         return
     if not context.args:
@@ -159,6 +176,8 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def budget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    assert update.message is not None
+    assert update.effective_chat is not None
     if not await _require_access(update):
         return
     usage = storage.load_usage()
@@ -172,9 +191,11 @@ async def budget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def add_flight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    assert update.message is not None
+    assert update.effective_chat is not None
     if not await _require_access(update):
         return
-    if len(context.args) < 3:
+    if context.args is None or len(context.args) < 3:
         await update.message.reply_text(
             "Usage: /add <name> <flight_iata> <YYYY-MM-DD>\n"
             "Use a single word for name, e.g. /add Mom RJ264 2026-08-05"
@@ -182,7 +203,10 @@ async def add_flight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     name, flight_iata, date = context.args[0], context.args[1], context.args[2]
     try:
-        datetime.strptime(date, "%Y-%m-%d")
+        # Format validation only -- the parsed value is discarded immediately
+        # and `date` (the original string) is what gets stored, so there's no
+        # naive-datetime footgun here to make timezone-aware.
+        datetime.strptime(date, "%Y-%m-%d")  # noqa: DTZ007
     except ValueError:
         await update.message.reply_text("Date must be in YYYY-MM-DD format.")
         return
@@ -207,6 +231,8 @@ async def add_flight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def remove_flight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    assert update.message is not None
+    assert update.effective_chat is not None
     if not await _require_access(update):
         return
     if not context.args:
@@ -223,6 +249,8 @@ async def remove_flight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 async def forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    assert update.message is not None
+    assert update.effective_chat is not None
     if not await _require_access(update):
         return
     if not await _is_chat_admin(update, context):
@@ -235,6 +263,8 @@ async def forget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def timezone_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    assert update.message is not None
+    assert update.effective_chat is not None
     if not await _require_access(update):
         return
     chat_id = str(update.effective_chat.id)
@@ -261,6 +291,8 @@ async def timezone_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def request_access_cmd(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
+    assert update.message is not None
+    assert update.effective_chat is not None
     chat_id = str(update.effective_chat.id)
     result = access.request_access(chat_id)
     if result == "approved":
@@ -274,15 +306,23 @@ async def request_access_cmd(
     )
     for admin_chat_id in access.ALLOWED_CHAT_IDS:
         try:
-            await resilience.send_with_retry(
-                lambda admin_chat_id=admin_chat_id: context.bot.send_message(
+            # A typed nested function, not a lambda: binds admin_chat_id via
+            # a default argument (the standard fix for a closure inside a
+            # loop -- ruff's B023 flags the bare-lambda version precisely
+            # because it'd break if this were ever changed to fire all sends
+            # concurrently instead of one at a time), and unlike a lambda its
+            # parameter can carry an explicit annotation, which is what lets
+            # mypy infer send_with_retry's generic return type here.
+            async def _notify(admin_chat_id: str = admin_chat_id) -> None:
+                await context.bot.send_message(
                     chat_id=admin_chat_id,
                     text=(
                         f"Access request from chat {chat_id}.\n"
                         f"Approve with /approve {chat_id} or deny with /deny {chat_id}."
                     ),
                 )
-            )
+
+            await resilience.send_with_retry(_notify)
         except Exception as e:  # noqa: BLE001 -- best-effort notify, one admin's failure shouldn't block the rest
             log.warning(
                 "Couldn't notify admin chat %s of access request: %s", admin_chat_id, e
@@ -290,6 +330,8 @@ async def request_access_cmd(
 
 
 async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    assert update.message is not None
+    assert update.effective_chat is not None
     chat_id = str(update.effective_chat.id)
     if not access.is_admin(chat_id):
         await update.message.reply_text("Only an operator can do that.")
@@ -312,6 +354,8 @@ async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def deny(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    assert update.message is not None
+    assert update.effective_chat is not None
     chat_id = str(update.effective_chat.id)
     if not access.is_admin(chat_id):
         await update.message.reply_text("Only an operator can do that.")
@@ -339,8 +383,10 @@ async def check_all_flights(context: ContextTypes.DEFAULT_TYPE) -> None:
             storage.mark_usage_warned()
             for admin_chat_id in access.ALLOWED_CHAT_IDS:
                 try:
-                    await resilience.send_with_retry(
-                        lambda admin_chat_id=admin_chat_id: context.bot.send_message(
+                    # See the comment in request_access_cmd on why this is a
+                    # typed nested function, not a lambda.
+                    async def _notify(admin_chat_id: str = admin_chat_id) -> None:
+                        await context.bot.send_message(
                             chat_id=admin_chat_id,
                             text=(
                                 "⚠️ Monthly Aviationstack request budget is nearly exhausted. "
@@ -348,7 +394,8 @@ async def check_all_flights(context: ContextTypes.DEFAULT_TYPE) -> None:
                                 "(manual /status still works with the requests held in reserve)."
                             ),
                         )
-                    )
+
+                    await resilience.send_with_retry(_notify)
                 except Exception as e:  # noqa: BLE001 -- best-effort notify, one admin's failure shouldn't block the rest
                     cycle_log.warning(
                         "Couldn't send budget warning to %s: %s", admin_chat_id, e
@@ -454,16 +501,19 @@ async def check_all_flights(context: ContextTypes.DEFAULT_TYPE) -> None:
                     summary,
                     subscriber_tz=subscriber_tz,
                 )
-                await resilience.send_with_retry(
-                    lambda sub=sub, text=text: context.bot.send_message(
-                        chat_id=sub["chat_id"], text=text
-                    )
-                )
+                # See the comment in request_access_cmd on why this is a
+                # typed nested function, not a lambda.
+                async def _send(
+                    chat_id: str = sub["chat_id"], text: str = text
+                ) -> None:
+                    await context.bot.send_message(chat_id=chat_id, text=text)
+
+                await resilience.send_with_retry(_send)
             storage.mark_changes_sent([p["id"] for p in pending])
         cycle_log.info("Recorded state for %s", flight_iata)
 
 
-async def _post_init(app: Application) -> None:
+async def _post_init(app: Application[Any, Any, Any, Any, Any, Any]) -> None:
     await app.bot.set_my_commands(
         [
             BotCommand("start", "Show help"),
@@ -480,7 +530,7 @@ async def _post_init(app: Application) -> None:
     )
 
 
-def _webhook_config() -> dict | None:
+def _webhook_config() -> dict[str, Any] | None:
     """Returns run_webhook() kwargs if WEBHOOK_MODE is enabled, else None
     (meaning: use run_polling()). Kept separate from main() so the config
     decision is testable without actually starting a server. Fits a

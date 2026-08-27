@@ -19,7 +19,7 @@ __all__ = [
     "get_provider",
 ]
 
-_PROVIDERS = {
+_PROVIDERS: dict[str, type[FlightProvider]] = {
     "aviationstack": AviationstackProvider,
     "fake": FakeProvider,
 }

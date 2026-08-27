@@ -23,9 +23,11 @@ scope:
 
 import os
 import sqlite3
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from threading import Lock
+from typing import Any
 
 from . import migrations
 
@@ -52,7 +54,7 @@ _SNAPSHOT_FIELDS = (
 
 
 @contextmanager
-def _db():
+def _db() -> Generator[sqlite3.Connection, None, None]:
     with _lock:
         conn = sqlite3.connect(DB_PATH)
         conn.execute("PRAGMA journal_mode=WAL")
@@ -65,7 +67,7 @@ def _db():
             conn.close()
 
 
-def _resolve_date(conn, flight_iata: str, date: str | None) -> str:
+def _resolve_date(conn: sqlite3.Connection, flight_iata: str, date: str | None) -> str:
     """Turn an optional date into a concrete scheduled_date key.
 
     date=None means "the caller doesn't know/care" -- fine as long as there's
@@ -94,7 +96,7 @@ def _resolve_date(conn, flight_iata: str, date: str | None) -> str:
 # answer a query on a specific chat's behalf.
 
 
-def load_flights(chat_id: str) -> list[dict]:
+def load_flights(chat_id: str) -> list[dict[str, Any]]:
     with _db() as conn:
         rows = conn.execute(
             "SELECT name, flight_iata, scheduled_date AS date, dep_country, arr_country "
@@ -150,7 +152,7 @@ def forget_chat(chat_id: str) -> int:
         return cur.rowcount
 
 
-def load_distinct_tracked_flights() -> list[dict]:
+def load_distinct_tracked_flights() -> list[dict[str, Any]]:
     """Every distinct (flight_iata, date) tracked by *any* chat -- for the
     poll loop only, which fetches a flight's status once and fans the result
     out to every chat subscribed to it (CLAUDE.md's "poll the flight once;
@@ -163,7 +165,7 @@ def load_distinct_tracked_flights() -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def get_subscribers(flight_iata: str, date: str) -> list[dict]:
+def get_subscribers(flight_iata: str, date: str) -> list[dict[str, Any]]:
     """Every chat subscribed to one (flight_iata, date), for fan-out."""
     flight_iata = flight_iata.upper()
     with _db() as conn:
@@ -200,7 +202,7 @@ def update_flight_countries(
 # --- flights (polling bookkeeping + last-known snapshot) --------------------
 
 
-def get_flight_schedule(flight_iata: str, date: str | None = None) -> dict:
+def get_flight_schedule(flight_iata: str, date: str | None = None) -> dict[str, Any]:
     flight_iata = flight_iata.upper()
     with _db() as conn:
         resolved = _resolve_date(conn, flight_iata, date)
@@ -220,7 +222,9 @@ def get_flight_schedule(flight_iata: str, date: str | None = None) -> dict:
     }
 
 
-def update_flight_schedule(flight_iata: str, date: str | None = None, **fields) -> None:
+def update_flight_schedule(
+    flight_iata: str, date: str | None = None, **fields: Any
+) -> None:
     flight_iata = flight_iata.upper()
     unknown = set(fields) - set(_DEFAULT_SCHEDULE_ENTRY)
     if unknown:
@@ -264,7 +268,7 @@ def update_flight_schedule(flight_iata: str, date: str | None = None, **fields) 
         )
 
 
-def get_flight_state(flight_iata: str, date: str) -> dict | None:
+def get_flight_state(flight_iata: str, date: str) -> dict[str, Any] | None:
     """The last-known key-fields snapshot for one (flight_iata, date), or
     None if it's never been checked successfully before (the "baseline not
     recorded yet" case that make check_all_flights skip alerting)."""
@@ -281,7 +285,7 @@ def get_flight_state(flight_iata: str, date: str) -> dict | None:
     return {k: row[k] for k in _SNAPSHOT_FIELDS}
 
 
-def save_flight_state(flight_iata: str, date: str, key_fields: dict) -> None:
+def save_flight_state(flight_iata: str, date: str, key_fields: dict[str, Any]) -> None:
     flight_iata = flight_iata.upper()
     values = [key_fields.get(k) for k in _SNAPSHOT_FIELDS]
     with _db() as conn:
@@ -338,7 +342,7 @@ def record_pending_change(
         return True
 
 
-def get_pending_changes(flight_iata: str, date: str) -> list[dict]:
+def get_pending_changes(flight_iata: str, date: str) -> list[dict[str, Any]]:
     """All not-yet-confirmed-sent changes for one (flight_iata, date),
     oldest first -- includes anything left over from a crash on a previous
     poll, so a retry naturally bundles with whatever's new this poll."""
@@ -361,7 +365,7 @@ def mark_changes_sent(change_ids: list[int]) -> None:
         )
 
 
-def load_state() -> dict:
+def load_state() -> dict[str, Any]:
     """Read-only convenience view: {flight_iata: last_snapshot}, flattened
     across dates. Kept only because Phase 0 tests call it directly; the
     scheduler loop itself uses get_flight_state/save_flight_state, which are
@@ -381,7 +385,7 @@ def _current_month() -> str:
     return datetime.now(UTC).strftime("%Y-%m")
 
 
-def load_usage() -> dict:
+def load_usage() -> dict[str, Any]:
     month = _current_month()
     with _db() as conn:
         count_row = conn.execute(
@@ -409,11 +413,11 @@ def increment_usage(
             "VALUES (?, ?, ?, ?, 1)",
             (provider, datetime.now(UTC).isoformat(), endpoint, http_status),
         )
-    return load_usage()["count"]
+    return int(load_usage()["count"])
 
 
 def usage_remaining(cap: int) -> int:
-    return max(0, cap - load_usage()["count"])
+    return max(0, cap - int(load_usage()["count"]))
 
 
 def mark_usage_warned() -> None:

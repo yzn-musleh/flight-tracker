@@ -60,7 +60,9 @@ class FieldChange:
     new_value: object
 
 
-def detect_changes(previous: dict | None, current: dict) -> list[FieldChange]:
+def detect_changes(
+    previous: dict[str, Any] | None, current: dict[str, Any]
+) -> list[FieldChange]:
     """Compare two key-fields snapshots and return the subset of changes
     worth alerting on. `previous` is the last-known snapshot (never None in
     practice here -- callers skip this entirely for a flight's first-ever
@@ -112,7 +114,7 @@ def _render_field(
 def format_alert_message(
     name: str,
     flight_iata: str,
-    pending_changes: list[dict],
+    pending_changes: list[dict[str, Any]],
     summary: Mapping[str, Any],
     subscriber_tz: str | None = None,
 ) -> str:

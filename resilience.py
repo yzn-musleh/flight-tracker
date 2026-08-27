@@ -11,6 +11,7 @@ import asyncio
 import logging
 import random
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -79,15 +80,15 @@ class CircuitBreaker:
         return self._opened_at is not None
 
 
-def retry_with_backoff(
-    attempt_fn,
+def retry_with_backoff[T](
+    attempt_fn: Callable[[], T],
     *,
-    is_retryable,
+    is_retryable: Callable[[T], bool],
     max_attempts: int = 3,
     base_delay: float = 1.0,
-    sleep=None,
-    rand=None,
-):
+    sleep: Callable[[float], None] | None = None,
+    rand: Callable[[], float] | None = None,
+) -> T:
     """Calls attempt_fn() repeatedly until it returns a non-retryable result
     (per is_retryable(result) -> bool) or raises, or max_attempts is used up.
 
@@ -100,24 +101,28 @@ def retry_with_backoff(
     """
     sleep = sleep if sleep is not None else time.sleep
     rand = rand if rand is not None else random.random
-    result = None
-    for attempt in range(max_attempts):
-        result = attempt_fn()
+    result: T = attempt_fn()
+    for attempt in range(max_attempts - 1):
         if not is_retryable(result):
             return result
-        if attempt < max_attempts - 1:
-            delay = base_delay * (2**attempt) * rand()
-            log.warning(
-                "Retryable failure on attempt %d/%d, backing off %.2fs",
-                attempt + 1,
-                max_attempts,
-                delay,
-            )
-            sleep(delay)
+        delay = base_delay * (2**attempt) * rand()
+        log.warning(
+            "Retryable failure on attempt %d/%d, backing off %.2fs",
+            attempt + 1,
+            max_attempts,
+            delay,
+        )
+        sleep(delay)
+        result = attempt_fn()
     return result
 
 
-async def send_with_retry(send_fn, *, max_attempts: int = 3, sleep=None):
+async def send_with_retry[R](
+    send_fn: Callable[[], Awaitable[R]],
+    *,
+    max_attempts: int = 3,
+    sleep: Callable[[float], Awaitable[None]] | None = None,
+) -> R:
     """Awaits send_fn() (a zero-arg async callable, e.g. a lambda wrapping
     context.bot.send_message(...)), retrying on Telegram's RetryAfter by
     waiting exactly as long as Telegram asks. CLAUDE.md: "Handle Telegram
