@@ -128,3 +128,55 @@ the test's own docstring — the rule doesn't carve out an exception for
 null transition, whitelisted alert on a null→terminal-status transition,
 dedupe-and-retry across a simulated crash) lives in
 `tests/test_change_detection.py`.
+
+## 6. Multi-tenancy (Phase 4): 11 `test_storage.py`/`test_bot_handlers.py` tests, all of `test_bot_alerts.py`
+
+**Phase:** 4 (multi-user and access control)
+
+**What they characterized:** a single-tenant model where `storage.add_flight`/
+`load_flights`/`remove_flight`/`update_flight_countries` had no concept of
+*whose* data they were touching, and `bot.py` pushed every alert to one
+operator-wide `CHAT_ID` read from `TELEGRAM_CHAT_ID`.
+
+**Why they can't pass anymore:** `HARDENING_PLAN.md`'s Phase 4 scope is
+explicit and absolute: *"Remove the global `TELEGRAM_CHAT_ID`. Every
+subscription belongs to the `chat_id` that created it..."* — matching
+`CLAUDE.md` invariant #5, *"There is no global 'the chat' any more."* This
+is not a side effect of some other change; removing the single-tenant model
+**is** the feature. Concretely:
+- `storage.add_flight`, `load_flights`, `remove_flight`, and
+  `update_flight_countries` all now take a required `chat_id` as their first
+  argument. Eleven tests across `test_storage.py` and `test_bot_handlers.py`
+  call one of these with the old (no-`chat_id`) signature — either directly
+  as fixture setup, or via a final assertion like
+  `storage.load_flights() == []`. Every one of them fails with a `TypeError`
+  (missing required argument), not a wrong-value assertion failure.
+- `bot.CHAT_ID` no longer exists at all. Every test in `test_bot_alerts.py`
+  shares an autouse fixture that does
+  `monkeypatch.setattr(bot, "CHAT_ID", "12345")`; `monkeypatch.setattr`
+  raises `AttributeError` when the target attribute doesn't exist, so all
+  nine tests in the file error during fixture setup, before their bodies
+  even run — including the one whose entire premise
+  (`test_no_chat_id_configured_does_nothing`) is that a global `CHAT_ID`
+  exists to be unset.
+
+**What was and wasn't rewritten to reduce this list:** an autouse
+`approved_default_chat` fixture (`tests/conftest.py`) pre-approves the
+default `FakeUpdate` chat_id, which fixed several handler tests
+(`test_list_flights_empty`, `test_by_country_requires_argument`,
+`test_status_reports_*`, `test_budget_reports_usage_and_days_left`) without
+touching them at all — they only exercise handlers, never call the changed
+storage functions directly, so the new access-control gate was the only
+thing standing between them and passing. The eleven and nine listed above
+call the changed functions/attribute directly and have no such escape hatch.
+Two adjacent, *not* Phase-0-frozen files were rewritten instead of left to
+break: `tests/test_importer.py` (Phase 1) and `tests/test_alert_persistence.py`
+(Phase 3) now pass a `chat_id` explicitly and assert on fan-out to multiple
+subscribers where relevant.
+
+**Disposition:** left failing, marked `xfail`, all twenty. New coverage of
+the correct chat-scoped behavior — including explicit cross-tenant isolation
+(chat A cannot see or remove chat B's flights), access approval/denial,
+`/forget`, `/timezone`, and alert fan-out to multiple subscribed chats —
+lives in `tests/test_multi_tenant.py` and the updated
+`tests/test_alert_persistence.py`.

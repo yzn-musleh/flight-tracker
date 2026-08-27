@@ -42,6 +42,36 @@ XFAIL_SUPERSEDED = {
     # now enforces the null-guard. See FINDINGS.md #5. New coverage of the
     # correct behavior is in tests/test_change_detection.py.
     "tests/test_bot_alerts.py::test_alert_fires_on_value_to_null_transition",
+    # Phase 4: storage.add_flight/load_flights/remove_flight/
+    # update_flight_countries now require chat_id (chat_id is the tenant
+    # boundary -- CLAUDE.md invariant #5); these call the old unscoped
+    # signature directly. See FINDINGS.md #6.
+    "tests/test_storage.py::test_add_flight_defaults_countries_unknown",
+    "tests/test_storage.py::test_add_flight_allows_duplicate_flight_number",
+    "tests/test_storage.py::test_remove_flight_removes_all_matching_codes_regardless_of_date",
+    "tests/test_storage.py::test_remove_flight_returns_false_when_not_found",
+    "tests/test_storage.py::test_update_flight_countries_only_fills_unknown_fields",
+    "tests/test_bot_handlers.py::test_list_flights_groups_by_route_sorted",
+    "tests/test_bot_handlers.py::test_by_country_matches_case_insensitively_on_either_side",
+    "tests/test_bot_handlers.py::test_add_flight_rejects_bad_date",
+    "tests/test_bot_handlers.py::test_add_flight_falls_back_to_unknown_countries_on_lookup_error",
+    "tests/test_bot_handlers.py::test_add_flight_resolves_countries_on_successful_lookup",
+    "tests/test_bot_handlers.py::test_remove_flight_reports_success_and_failure",
+    # Phase 4: removed the global bot.CHAT_ID entirely (HARDENING_PLAN's
+    # explicit instruction) in favor of per-chat subscriptions and fan-out
+    # alerting -- every test in this file's autouse fixture monkeypatches
+    # bot.CHAT_ID, which no longer exists. See FINDINGS.md #6. New coverage
+    # is in tests/test_alert_persistence.py (now chat-scoped) and
+    # tests/test_multi_tenant.py.
+    "tests/test_bot_alerts.py::test_no_chat_id_configured_does_nothing",
+    "tests/test_bot_alerts.py::test_first_check_records_baseline_and_sends_no_alert",
+    "tests/test_bot_alerts.py::test_no_alert_when_nothing_changed",
+    "tests/test_bot_alerts.py::test_alert_sent_when_status_changes",
+    "tests/test_bot_alerts.py::test_budget_exhausted_stops_processing_remaining_flights",
+    "tests/test_bot_alerts.py::test_lookup_error_for_one_flight_does_not_block_the_next",
+    "tests/test_bot_alerts.py::test_country_backfill_when_unknown",
+    "tests/test_bot_alerts.py::test_skips_flight_when_not_due",
+    "tests/test_bot_alerts.py::test_usage_margin_gate_pauses_all_polling_and_warns_once",
 }
 
 
@@ -60,6 +90,20 @@ def pytest_collection_modifyitems(config, items):
 def isolated_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "DB_PATH", str(tmp_path / "test.db"))
     yield tmp_path
+
+
+DEFAULT_TEST_CHAT_ID = "12345"  # matches tests/fakes.py's FakeUpdate default
+
+
+@pytest.fixture(autouse=True)
+def approved_default_chat(isolated_storage):
+    """Phase 4 gates every data-touching command on chat access approval.
+    Pre-approving the default FakeUpdate chat_id here means handler tests
+    written before Phase 4 (which have no idea access control exists) keep
+    exercising real handler behavior instead of being turned away at the
+    gate -- without editing any of those test files. Tests that need a
+    *different*, unapproved chat_id do so explicitly and aren't affected."""
+    storage.set_chat_access_status(DEFAULT_TEST_CHAT_ID, "approved")
 
 
 @pytest.fixture(autouse=True)
