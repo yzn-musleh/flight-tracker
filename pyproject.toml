@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "family-flight-tracker"
+version = "0.1.0"
+description = "Telegram bot that tracks flights and alerts on status changes."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+    "python-telegram-bot[job-queue]==21.6",
+    "requests==2.32.3",
+    "python-dotenv==1.0.1",
+]
+
+# Exact versions match what this project was developed and tested against
+# (see PROGRESS.md); requirements.txt is kept as-is alongside this for
+# Docker's build step (Phase 6) to install from directly without needing
+# pip's full pyproject/build-backend resolution in the image.
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "ruff==0.16.4",
+    "mypy==2.3.1",
+    "time-machine==3.5.0",
+]
+
+[tool.setuptools]
+py-modules = [
+    "bot",
+    "flight_api",
+    "scheduler",
+    "airports",
+    "change_detection",
+    "timezones",
+    "access",
+    "resilience",
+    "singleton",
+    "logging_config",
+]
+
+[tool.setuptools.packages.find]
+include = ["storage*", "providers*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+# No explicit `[tool.ruff.lint] select`: this project has been linted
+# against ruff's *default* rule set from Phase 0 onward (there was never a
+# ruff config file before this one), so an explicit select list here would
+# risk silently narrowing or widening what gets flagged. Only non-rule-
+# selection settings (target-version) are pinned.
+
+[tool.mypy]
+python_version = "3.12"
+# Not yet `strict = true` project-wide: bot.py's handlers access
+# python-telegram-bot's Optional-typed Update/Context attributes
+# (update.message, update.effective_chat, ...) throughout without guards,
+# predating this hardening effort -- see PROGRESS.md's Phase 4/5 entries.
+# Fixing that is a real, scoped follow-up, not something to flip on here
+# and silently suppress with a blanket ignore.
