@@ -501,6 +501,7 @@ async def check_all_flights(context: ContextTypes.DEFAULT_TYPE) -> None:
                     summary,
                     subscriber_tz=subscriber_tz,
                 )
+
                 # See the comment in request_access_cmd on why this is a
                 # typed nested function, not a lambda.
                 async def _send(
