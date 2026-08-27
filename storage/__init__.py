@@ -37,6 +37,7 @@ _DEFAULT_SCHEDULE_ENTRY = {
     "done": False,
     "dep_scheduled": None,
     "arr_scheduled": None,
+    "next_poll_at": None,
 }
 
 _SNAPSHOT_FIELDS = (
@@ -204,8 +205,8 @@ def get_flight_schedule(flight_iata: str, date: str | None = None) -> dict:
     with _db() as conn:
         resolved = _resolve_date(conn, flight_iata, date)
         row = conn.execute(
-            "SELECT last_checked, done, dep_scheduled, arr_scheduled FROM flights "
-            "WHERE flight_iata = ? AND scheduled_date = ?",
+            "SELECT last_checked, done, dep_scheduled, arr_scheduled, next_poll_at "
+            "FROM flights WHERE flight_iata = ? AND scheduled_date = ?",
             (flight_iata, resolved),
         ).fetchone()
     if row is None:
@@ -215,6 +216,7 @@ def get_flight_schedule(flight_iata: str, date: str | None = None) -> dict:
         "done": bool(row["done"]),
         "dep_scheduled": row["dep_scheduled"],
         "arr_scheduled": row["arr_scheduled"],
+        "next_poll_at": row["next_poll_at"],
     }
 
 
@@ -227,8 +229,8 @@ def update_flight_schedule(flight_iata: str, date: str | None = None, **fields) 
     with _db() as conn:
         resolved = _resolve_date(conn, flight_iata, date)
         row = conn.execute(
-            "SELECT last_checked, done, dep_scheduled, arr_scheduled FROM flights "
-            "WHERE flight_iata = ? AND scheduled_date = ?",
+            "SELECT last_checked, done, dep_scheduled, arr_scheduled, next_poll_at "
+            "FROM flights WHERE flight_iata = ? AND scheduled_date = ?",
             (flight_iata, resolved),
         ).fetchone()
         current = (
@@ -237,6 +239,7 @@ def update_flight_schedule(flight_iata: str, date: str | None = None, **fields) 
                 "done": bool(row["done"]),
                 "dep_scheduled": row["dep_scheduled"],
                 "arr_scheduled": row["arr_scheduled"],
+                "next_poll_at": row["next_poll_at"],
             }
             if row
             else dict(_DEFAULT_SCHEDULE_ENTRY)
@@ -244,10 +247,11 @@ def update_flight_schedule(flight_iata: str, date: str | None = None, **fields) 
         entry = {**current, **fields}
         conn.execute(
             "INSERT INTO flights (flight_iata, scheduled_date, last_checked, done, "
-            "dep_scheduled, arr_scheduled) VALUES (?, ?, ?, ?, ?, ?) "
+            "dep_scheduled, arr_scheduled, next_poll_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT(flight_iata, scheduled_date) DO UPDATE SET "
             "last_checked=excluded.last_checked, done=excluded.done, "
-            "dep_scheduled=excluded.dep_scheduled, arr_scheduled=excluded.arr_scheduled",
+            "dep_scheduled=excluded.dep_scheduled, arr_scheduled=excluded.arr_scheduled, "
+            "next_poll_at=excluded.next_poll_at",
             (
                 flight_iata,
                 resolved,
@@ -255,6 +259,7 @@ def update_flight_schedule(flight_iata: str, date: str | None = None, **fields) 
                 int(entry["done"]),
                 entry["dep_scheduled"],
                 entry["arr_scheduled"],
+                entry["next_poll_at"],
             ),
         )
 

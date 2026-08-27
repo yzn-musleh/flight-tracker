@@ -77,13 +77,24 @@ def tier_interval_minutes(flight: dict, sched: dict, now: datetime) -> int:
     return close_interval if nearest_gap_hours <= close_hours else far_interval
 
 
+def compute_next_poll_at(flight: dict, sched: dict, now: datetime) -> str:
+    """The persisted due-time for a flight's *next* check, fixed at the
+    moment of the check that computes it (using the tier that applies as of
+    `now`) rather than recomputed from scratch on every later tick. Storing
+    this (Phase 5) rather than only `last_checked` is what lets a restart
+    resume exactly where it left off: the next poll time is a fact recorded
+    at schedule-time, not a value that silently shifts depending on when
+    something happens to ask "is it due yet"."""
+    interval = timedelta(minutes=tier_interval_minutes(flight, sched, now))
+    return (now + interval).isoformat()
+
+
 def is_due(flight: dict, sched: dict, now: datetime) -> bool:
     if not is_active_window(flight, sched, now):
         return False
 
-    last_checked = _parse_iso(sched.get("last_checked"))
-    if last_checked is None:
-        return True
+    next_poll_at = _parse_iso(sched.get("next_poll_at"))
+    if next_poll_at is None:
+        return True  # never scheduled yet (e.g. first check, or pre-Phase-5 data)
 
-    interval = timedelta(minutes=tier_interval_minutes(flight, sched, now))
-    return now - last_checked >= interval
+    return now >= next_poll_at

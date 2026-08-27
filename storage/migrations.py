@@ -135,6 +135,18 @@ MIGRATIONS: list[tuple[int, str]] = [
         );
         """,
     ),
+    (
+        5,
+        """
+        -- Phase 5: persisted next_poll_at replaces recomputing "is this due"
+        -- from last_checked + the tier interval on every tick. It's fixed at
+        -- the moment it's computed (using the tier as of that check), so a
+        -- restart resumes from an explicit, stored fact rather than
+        -- re-deriving a value that could drift depending on when a process
+        -- happens to ask.
+        ALTER TABLE flights ADD COLUMN next_poll_at TEXT;
+        """,
+    ),
 ]
 
 
