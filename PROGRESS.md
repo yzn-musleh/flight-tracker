@@ -1,5 +1,113 @@
 # Progress Log
 
+## Phase 5 — Resilience and the scheduler
+
+**What I did**
+- Branched `harden/phase-5-resilience` from Phase 4's tip.
+- Rewrote `scheduler.is_due()` to compare against a persisted `next_poll_at`
+  (migration version 5 adds `flights.next_poll_at`) instead of recomputing
+  the tier interval from `last_checked` on every call; added
+  `scheduler.compute_next_poll_at()` and wired it into both
+  `update_flight_schedule()` call sites in `check_all_flights` (success and
+  lookup-failure paths).
+- Added `resilience.py` (circuit breaker, retry-with-backoff,
+  Telegram-RetryAfter helper) and wired it into `flight_api.py` and every
+  `send_message` call in `bot.py`.
+- Added `singleton.py` (PID-file lock) and `logging_config.py` (JSON
+  logging, redaction, correlation-id adapter), wired into `bot.py`'s
+  `main()` and `check_all_flights()`.
+- Verified `python-telegram-bot`'s SIGTERM handling directly against the
+  installed library's source/docstring (`Application.run_polling`'s
+  `stop_signals` parameter defaults to `SIGINT, SIGTERM, SIGABRT` on
+  non-Windows) rather than assuming it from memory — this is exactly the
+  kind of claim the project's rules say to verify, not invent.
+- Ran a real smoke test of the JSON logging + redaction (confirmed a fake
+  token string is replaced with `***REDACTED***` in actual log output) and
+  of the single-instance lock (confirmed a second `acquire()` while the
+  first is still held raises, and that release cleans up).
+
+**What I decided and why**
+- **Found and fixed a real bug in my own first draft of `retry_with_backoff`
+  before it shipped**: `sleep=time.sleep`/`rand=random.random` as *default
+  parameter values* bind those function references once, at module-import
+  time — a test that later does `monkeypatch.setattr(resilience.time,
+  "sleep", fake)` has no effect on an already-bound default, so my first
+  version of the resilience test suite actually slept for real seconds
+  during backoff delays (a 7-test file took 3.46s; it should have taken
+  milliseconds). Fixed by resolving `time.sleep`/`random.random` (and
+  `asyncio.sleep`, same bug in `send_with_retry`) *inside* the function body
+  instead of as defaults, so the lookup happens at call time and genuinely
+  respects a monkeypatch. Worth calling out because this exact bug pattern
+  — "injectable dependency" that isn't actually injectable due to
+  default-argument binding — is easy to write and easy to not notice unless
+  you're watching the test runtime.
+- **Retry/circuit-breaker scope is exactly HTTP status codes, not raw
+  connection exceptions.** CLAUDE.md's failure semantics section enumerates
+  "429 and 5xx" and "4xx other than 429" — both response-shaped. A raw
+  `requests.ConnectionError` (no response at all) is treated as an
+  immediate, single-attempt failure: recorded against the circuit breaker
+  and raised as `FlightLookupError`, but not retried within the same call.
+  This is a deliberate, narrower scope than "retry anything that might be
+  transient" — expanding it would be reasonable future work but isn't what
+  was asked.
+- **Each real HTTP attempt increments usage separately, not once per logical
+  call.** If a request retries twice due to 429s, that's two real requests
+  against Aviationstack's actual server-side quota, and under-counting them
+  locally would risk exceeding the real quota without our own accounting
+  ever noticing (CLAUDE.md invariant #3). The tradeoff: the pre-call budget
+  check (`usage_remaining(cap) <= 0`) isn't re-verified between retries
+  within one call, so a burst of 429s right at the boundary could
+  theoretically consume 1-2 units past the checked threshold. Accepted as a
+  minor, rare-in-practice imprecision rather than adding a re-check on every
+  retry attempt for a 100-requests/month hobby-scale budget.
+- **A non-429 4xx now raises `FlightLookupError` instead of an uncaught
+  `requests.HTTPError`.** This was a real, pre-existing robustness bug I
+  found while implementing this phase, not something Phase 5 asked for
+  directly — but CLAUDE.md's "4xx other than 429: do not retry, log once,
+  mark the flight as needing attention" only makes sense if that error is
+  actually catchable, and it wasn't (a bare `resp.raise_for_status()` raised
+  `requests.HTTPError`, which `bot.py`'s `except flight_api.FlightLookupError`
+  never caught, so it would have crashed the entire poll cycle including
+  every flight after the one that 404'd). Fixing it was necessary to make
+  the stated failure semantics true at all, not scope creep.
+- **Single-instance lock is a plain PID file, not the `filelock` package.**
+  ~30 lines of stdlib `os.kill(pid, 0)`-based liveness checking covers what's
+  needed (detect and reclaim a stale lock from a crashed process) without a
+  new dependency. Documented the real, verified platform gap this creates:
+  `os.kill(pid, 0)` for a nonexistent pid raises a generic `OSError` on
+  Windows (confirmed empirically, not assumed) rather than
+  `ProcessLookupError`, so stale-lock reclaim is exact on POSIX (the actual
+  Phase 6 Docker/Linux deployment target) and conservative
+  (assume-still-running, refuse to steal the lock) on Windows. One test is
+  explicitly skipped on Windows for this reason, with the platform
+  difference explained in the skip reason rather than silently passing or
+  silently failing.
+- **Structured logging redacts on the fully-rendered string, not raw
+  `%`-args.** Mutating `record.msg`/`record.args` before Python's own
+  `%`-substitution runs is fragile (args can be non-strings, substitution
+  order matters); redacting `record.getMessage()`'s already-substituted
+  output, and `formatException()`'s already-rendered traceback, in the
+  formatter itself is simpler and can't get out of sync with how logging's
+  own substitution works.
+- **Correlation id via `logging.LoggerAdapter`, not `extra=` at every call
+  site.** One adapter created at the top of `check_all_flights`
+  (`cycle_log`) tags every message logged through it automatically, instead
+  of every individual `log.info(...)` call needing to remember to pass
+  `extra={"correlation_id": ...}`.
+
+**What I deliberately did not do**
+- Did not retry raw connection-level exceptions (no HTTP response at all) —
+  see above.
+- Did not re-verify the quota budget between retry attempts within a single
+  `get_flight_status()` call — see above.
+- Did not add the `filelock` package — see above.
+- Did not reimplement SIGTERM handling — verified `python-telegram-bot`
+  already does this correctly on the deployment target and would have been
+  redundant, possibly conflicting, code.
+- Did not build a distributed/multi-host lock — `singleton.py` is explicitly
+  a single-machine safeguard, matching the actual deployment shape (one
+  bot process, per `HARDENING_PLAN.md`'s Phase 6 Docker Compose plan).
+
 ## Phase 4 — Multi-user and access control
 
 **What I did**

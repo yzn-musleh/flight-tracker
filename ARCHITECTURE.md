@@ -60,6 +60,27 @@ still going, and `CHANGELOG.md`/`PROGRESS.md` for the phase-by-phase history.
   `/remove`/`/forget` inside group chats (`bot._is_chat_admin`, real Telegram
   chat-admin status — private chats are exempt). Registered the command list
   via `set_my_commands` in an `Application.post_init` hook.
+- **Phase 5**: replaced recompute-from-`last_checked` scheduling with a
+  persisted `next_poll_at` (migration version 5):
+  `scheduler.compute_next_poll_at` fixes the next due-time at check-time
+  (using the tier that applies then), and `is_due` just compares against
+  it — a restart reads the same stored fact rather than re-deriving a value
+  that could drift depending on when something asks. Added `resilience.py`:
+  `CircuitBreaker` (per-provider, closed/open/half-open) and
+  `retry_with_backoff` (exponential + full jitter, injectable sleep/rand)
+  wired into `flight_api.get_flight_status` for 429/5xx; a non-429 4xx now
+  fails fast as `FlightLookupError` instead of an uncaught
+  `requests.HTTPError` crashing the poll loop (a real pre-existing gap,
+  fixed here). `resilience.send_with_retry` handles Telegram's `RetryAfter`
+  by waiting exactly as long as asked, wired into every `send_message` call
+  in `bot.py`. Added `singleton.py` (PID-file single-instance lock,
+  POSIX-precise / Windows-conservative — see its docstring) and
+  `logging_config.py` (JSON structured logging, secret redaction on the
+  fully-rendered message/traceback, a correlation id per poll cycle via
+  `logging.LoggerAdapter`). Verified (not reimplemented): `python-telegram-bot`'s
+  `Application.run_polling()` already installs SIGINT/SIGTERM/SIGABRT
+  handlers and drains gracefully by default on non-Windows platforms —
+  confirmed from the installed library's own docstring, not assumed.
 
 ## Modules
 
@@ -493,9 +514,14 @@ else) unless the calling chat is approved — see "Access control" below.
 - ~~Airport country resolution is a live, uncached-until-hit API call sharing
   no budget accounting with the main quota~~ **Fixed in Phase 2**: resolved
   from a bundled offline dataset, zero network calls, zero quota impact.
-- No structured logging, no secret redaction (tokens aren't logged today, but
-  nothing enforces that going forward), no circuit breaker/backoff beyond the
-  monthly-cap check, no graceful shutdown, no single-instance lock.
+- ~~No structured logging, no secret redaction... no circuit breaker/backoff
+  beyond the monthly-cap check, no graceful shutdown, no single-instance
+  lock~~ **Fixed in Phase 5**: JSON logging with redaction
+  (`logging_config.py`), a circuit breaker + exponential backoff for 429/5xx
+  (`resilience.py`), a PID-file single-instance lock (`singleton.py`), and
+  graceful SIGTERM shutdown — the last one turned out to already be provided
+  by `python-telegram-bot` itself (verified from its own docstring), not
+  something this project needed to add.
 
 These gaps are the reason for Phases 1–5; this document only records that they
 exist today, as a baseline for judging whether later phases actually fixed them.

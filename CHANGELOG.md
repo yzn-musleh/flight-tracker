@@ -5,6 +5,41 @@ All notable changes to this project are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Phase 5 — Resilience and the scheduler
+- Replaced recompute-from-`last_checked` scheduling with a persisted
+  `next_poll_at` per flight (migration version 5): fixed at check-time using
+  the tier that applies then, so a restart resumes from an explicit stored
+  fact rather than a value that could drift depending on when something
+  asks "is it due yet".
+- Added `resilience.py`: a per-provider `CircuitBreaker`
+  (closed/open/half-open) and `retry_with_backoff` (exponential backoff with
+  full jitter, injectable sleep/rand for fast deterministic tests), wired
+  into `flight_api.get_flight_status` for HTTP 429/5xx. Fixed a real
+  pre-existing gap along the way: a non-429 4xx used to raise an uncaught
+  `requests.HTTPError` that would crash the whole poll cycle; it now raises
+  `FlightLookupError`, handled the same as any other lookup failure.
+- Added `resilience.send_with_retry`, handling Telegram's `RetryAfter` by
+  waiting exactly as long as asked before retrying, wired into every
+  `send_message` call in `bot.py`.
+- Added `singleton.py`: a PID-file single-instance lock so a second copy of
+  the bot can't run against the same token/database, with a clear error
+  instead of a confusing Telegram 409.
+- Added `logging_config.py`: JSON structured logging with secret redaction
+  (tokens are stripped from the fully-rendered message and exception
+  tracebacks, not just raw log args) and a correlation id per poll cycle.
+- Verified — rather than reimplemented — that `python-telegram-bot`'s
+  `Application.run_polling()` already installs SIGINT/SIGTERM/SIGABRT
+  handlers and drains gracefully by default on non-Windows platforms
+  (confirmed from the installed library's own docstring).
+- 3 Phase 0 tests characterized the old last-checked-based scheduling
+  algorithm and `get_flight_schedule()`'s exact pre-`next_poll_at` dict
+  shape; left failing and marked `xfail` — see `FINDINGS.md` #7. New
+  coverage is in `tests/test_scheduler_next_poll_at.py`,
+  `tests/test_resilience.py`, `tests/test_flight_api_resilience.py`,
+  `tests/test_singleton.py`, and `tests/test_logging_config.py`.
+- No new runtime dependencies (`asyncio`/`random`/`time`/`dataclasses` are
+  stdlib; the single-instance lock is a plain PID file, not a new package).
+
 ### Phase 4 — Multi-user and access control
 - **Removed the global `TELEGRAM_CHAT_ID`.** Every subscription belongs to
   the `chat_id` that created it (`storage.add_flight`/`load_flights`/
