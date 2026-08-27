@@ -234,3 +234,44 @@ async def test_alert_fans_out_to_every_chat_subscribed_to_the_same_flight(monkey
     assert set(sent_by_chat) == {"111", "222"}
     assert "Mom" in sent_by_chat["111"]
     assert "Uncle Khalid" in sent_by_chat["222"]
+
+
+async def test_telegram_rate_limit_is_retried_not_lost(monkeypatch):
+    """New in Phase 5: CLAUDE.md's "Handle Telegram RetryAfter" -- a
+    rate-limited send during fan-out is retried (after waiting exactly as
+    long as Telegram asks) within the same poll, not dropped or deferred to
+    the next scheduler tick."""
+    from telegram.error import RetryAfter
+
+    bot = _get_bot(monkeypatch)
+    storage.add_flight(TEST_CHAT_ID, "Mom", "RJ264", "2026-08-05")
+    responses = iter([_raw_flight(), _raw_flight(flight_status="active")])
+    monkeypatch.setattr(
+        bot.flight_api, "get_flight_status", lambda *a, **k: next(responses)
+    )
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(bot.resilience.asyncio, "sleep", fake_sleep)
+
+    await bot.check_all_flights(FakeContext())  # baseline
+
+    context = FakeContext()
+    send_attempts = iter([RetryAfter(3), None])
+
+    async def _send(*args, **kwargs):
+        item = next(send_attempts)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+    context.bot.send_message.side_effect = _send
+
+    await bot.check_all_flights(context)
+
+    assert sleeps == [3]
+    assert context.bot.send_message.await_count == 2  # one retry, then success
+    assert storage.get_pending_changes("RJ264", "2026-08-05") == []  # confirmed sent
