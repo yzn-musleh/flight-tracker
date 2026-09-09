@@ -2,9 +2,8 @@
 
 A self-hostable Telegram bot that tracks flights and messages a chat when
 status, delay, gate, or terminal changes — instead of everyone individually
-refreshing a flight-tracking website. Built for tracking family members'
-flights, but nothing about it is Jordan- or family-specific: it works for
-any flight, any chat or group, any number of people.
+refreshing a flight-tracking website. Built for a family tracking each
+other's flights: a handful of chats, each with their own tracked flights.
 
 - **Multi-chat, tenant-isolated**: each chat/group only ever sees its own
   tracked flights.
@@ -15,17 +14,7 @@ any flight, any chat or group, any number of people.
 - **Free-tier friendly**: a scheduler that only spends an API request when a
   flight is actually close to departing/arriving, with a hard monthly quota
   gate.
-- **Runs anywhere**: Docker, systemd, or `python bot.py` directly; long
-  polling or a webhook behind a reverse proxy/tunnel.
-
-<!--
-Screenshot placeholder: a real screenshot of the bot's Telegram messages
-(the /list output and a status-change alert) belongs here. Not included in
-this rewrite -- generating one would mean either fabricating a fake Telegram
-conversation or needing a live bot + real chat to capture from, and this
-project explicitly avoids inventing things that look real but aren't. Add
-one from your own running bot before publishing if you'd like it.
--->
+- **Runs anywhere**: Docker, systemd, or `python bot.py` directly.
 
 ## Quickstart
 
@@ -33,31 +22,26 @@ one from your own running bot before publishing if you'd like it.
    → `/newbot` → follow the prompts → copy the token
    (looks like `123456789:AAExxxxx...`).
 2. **Get a flight-data API key.** Free tier: [Aviationstack](https://aviationstack.com/),
-   100 requests/month — sign up and copy your access key. (See
-   [Choosing a flight data provider](#choosing-a-flight-data-provider) below
-   if you want to compare alternatives before committing.)
+   100 requests/month — sign up and copy your access key.
 3. **Configure.** Copy `.env.example` to `.env`, fill in
    `TELEGRAM_BOT_TOKEN` and `AVIATIONSTACK_API_KEY`. Leave `ALLOWED_CHAT_IDS`
    blank for now.
-4. **Run it** (three ways, pick one — see [Running it](#running-it) below):
+4. **Run it** (see [Running it](#running-it) below):
    ```bash
    docker compose up -d --build
    ```
-5. **Approve your own chat.** Message your bot `/start` — it replies with
-   your chat ID. Put that in `ALLOWED_CHAT_IDS` in `.env`, restart, and
-   you're the operator.
+5. **Allowlist your own chat.** Message your bot `/start` — it replies with
+   your chat ID. Put that in `ALLOWED_CHAT_IDS` in `.env` and restart.
 6. **Track a flight:**
    ```
    /add Mom RJ264 2026-08-05
    ```
 
-That's the whole path from zero to a working bot. Everything below fills in
-the details.
+That's the whole path from zero to a working bot.
 
 ## Running it
 
-Three ways to run it continuously, in increasing order of how "always-on"
-they are. All three read the same `.env`.
+All three read the same `.env`.
 
 **Quickest, for trying it out:**
 ```bash
@@ -81,23 +65,20 @@ See [`deploy/README.md`](deploy/README.md) for the full setup —
 `deploy/flight-tracker.service` runs it as a dedicated non-root user with
 automatic restart on failure.
 
-## Approving chats
+## Allowlisting chats
 
 The bot supports multiple independent chats/groups (each only ever sees its
-own tracked flights), so every chat needs approval before it can do anything.
+own tracked flights). There's no self-service signup — you (the operator)
+add each chat's ID yourself:
 
 1. Open a chat with your bot in Telegram (or add it to a family group) and
    send `/start`. It replies with that chat's ID.
-2. Put that ID in `ALLOWED_CHAT_IDS` in `.env` (comma-separate multiple IDs
-   if more than one chat should be an operator/admin), then restart the bot.
-   This chat is now always approved and can also approve others.
-3. Any other chat that wants to use the bot sends `/request_access` — you'll
-   get a notification with `/approve <chat_id>` / `/deny <chat_id>` to
-   decide.
+2. Put that ID in `ALLOWED_CHAT_IDS` in `.env` (comma-separate multiple
+   IDs), then restart the bot.
 
 ## Adding flights
 
-In an approved chat:
+In an allowlisted chat:
 
 ```
 /add Mom RJ264 2026-08-05
@@ -127,12 +108,10 @@ and filled in automatically the first time the periodic check finds data.
 | `/forget` | Delete all of this chat's tracked flights and settings (group chats: admins only) |
 | `/timezone [IANA name]` | Show or set the timezone flight times are shown in for this chat, e.g. `/timezone Asia/Amman` |
 | `/budget` | Show how many of this month's API requests are used (shared across every chat using this bot) |
-| `/request_access` | Ask the operator to approve this chat |
-| `/approve <chat_id>` / `/deny <chat_id>` | Operator-only: decide a pending access request |
 
-Every command except `/start` and `/request_access` only works once a chat
-is approved — see [Approving chats](#approving-chats). A chat only ever
-sees and manages its own tracked flights, never another chat's.
+Every command except `/start` only works once a chat is in
+`ALLOWED_CHAT_IDS` — see [Allowlisting chats](#allowlisting-chats). A chat
+only ever sees and manages its own tracked flights, never another chat's.
 
 ## How alerts work
 
@@ -165,16 +144,9 @@ chat's timezone (`/timezone`, default `SUBSCRIBER_TIMEZONE`/UTC if never set).
 Alerts are also crash-safe: every detected change is durably recorded
 *before* the bot attempts to send it, and a send that fails or is
 interrupted (a crash, a restart, Telegram rate-limiting) is retried on the
-next poll rather than lost or sent twice.
-
-## Webhook mode
-
-By default the bot long-polls Telegram (no inbound network access needed at
-all). Set `WEBHOOK_MODE=true` in `.env` to instead have Telegram push
-updates to a public HTTPS URL. This fits a reverse-proxy or tunnel setup
-(e.g. Cloudflare Tunnel) that terminates TLS externally: the bot process
-itself only ever speaks plain HTTP on `WEBHOOK_LISTEN:WEBHOOK_PORT`, never
-holding an outbound connection open.
+next poll rather than lost or sent twice. Requests to Aviationstack retry
+with exponential backoff on rate limits (429) and server errors (5xx); any
+other error is logged once and the flight is skipped until the next poll.
 
 ## Configuration reference
 
@@ -185,11 +157,10 @@ else has a working default.
 | Variable | Default | Meaning |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | — (required) | From @BotFather |
-| `AVIATIONSTACK_API_KEY` | — (required for the default provider) | From aviationstack.com |
-| `ALLOWED_CHAT_IDS` | *(empty)* | Comma-separated chat IDs always approved; can `/approve`/`/deny` others |
+| `AVIATIONSTACK_API_KEY` | — (required) | From aviationstack.com |
+| `ALLOWED_CHAT_IDS` | *(empty)* | Comma-separated chat IDs allowed to use the bot |
 | `DB_PATH` | `flights.db` | SQLite database file path |
 | `LOCK_PATH` | `bot.lock` | Single-instance lock file path |
-| `FLIGHT_PROVIDER` | `aviationstack` | Which `providers/` implementation to use |
 | `SCHEDULER_TICK_MINUTES` | `15` | How often the bot checks whether any flight is due for a poll |
 | `CHECK_INTERVAL_MINUTES` | `30` | Poll cadence once within `CLOSE_EVENT_HOURS` of an event |
 | `FAR_TIER_MINUTES` | `120` | Poll cadence while in the active window but not yet close |
@@ -199,28 +170,6 @@ else has a working default.
 | `MONTHLY_REQUEST_CAP` | `100` | Monthly API request budget |
 | `REQUEST_SAFETY_MARGIN` | `5` | Requests held in reserve for manual `/status` |
 | `SUBSCRIBER_TIMEZONE` | `UTC` | Default display timezone for a chat that hasn't set its own via `/timezone` |
-| `WEBHOOK_MODE` | `false` | `true`/`1`/`yes` to use webhook mode instead of long polling |
-| `WEBHOOK_URL` | — (required if `WEBHOOK_MODE=true`) | Public HTTPS base URL Telegram POSTs to |
-| `WEBHOOK_PATH` | `/telegram-webhook` | URL path component |
-| `WEBHOOK_LISTEN` | `0.0.0.0` | Address the bot's HTTP server binds to |
-| `WEBHOOK_PORT` | `8443` | Port the bot's HTTP server binds to |
-
-## Choosing a flight data provider
-
-Aviationstack (100 requests/month free) is the default and what this project
-is tuned around — every polling-cadence knob above exists to survive that
-quota. [`docs/providers.md`](docs/providers.md) compares it against
-AeroDataBox, FlightAware AeroAPI, Aviation Edge, and OpenSky, checked
-against each vendor's live documentation, with a recommendation. Short
-version: AeroDataBox is the one worth switching to if you ever do — it has
-webhook-based push alerts on a plan with a usable free quota, which would
-eliminate most of the polling machinery entirely. Nobody has been switched
-to it here; that's a decision for you to make with current pricing/quota
-information, not something this project should decide on your behalf.
-
-Adding a new provider means writing one `providers/<name>.py` implementing
-the `FlightProvider` protocol (`providers/base.py`) and registering it in
-`providers/__init__.py` — nothing else in the codebase needs to change.
 
 ## Troubleshooting
 
@@ -236,9 +185,8 @@ restart; if this keeps happening, something is starting the bot twice
 (check for both a systemd unit *and* a manual `python bot.py` running, or a
 Docker container that didn't fully stop).
 
-**"This chat isn't approved to use this bot yet."** — expected for any chat
-that hasn't been put in `ALLOWED_CHAT_IDS` or `/approve`d. Send
-`/request_access` and have an operator chat run `/approve <chat_id>`.
+**"This chat isn't approved to use this bot."** — expected for any chat
+that hasn't been put in `ALLOWED_CHAT_IDS`. Add its chat ID and restart.
 
 **No alerts are arriving, but `/status` works.** — `/status` bypasses the
 scheduler entirely and always makes a live request; the periodic checker
@@ -253,29 +201,11 @@ until a chat sets its own. Times are always shown in *both* the airport's
 local timezone and the chat's timezone, so if only one looks off, check
 which one you're reading.
 
-**Webhook mode isn't receiving updates.** — confirm `WEBHOOK_URL` is
-reachable from the public internet over HTTPS (the bot itself speaks plain
-HTTP; TLS termination is your reverse proxy/tunnel's job) and that nothing
-else is bound to `WEBHOOK_PORT`. Long polling (the default) needs none of
-this — if webhook mode is giving trouble, setting `WEBHOOK_MODE=false` is a
-safe fallback.
-
 **Upgrading from an older, single-chat version of this bot.** — All state
-now lives in a single SQLite database file (`flights.db`, `DB_PATH`). If
-you're upgrading from a version that used `flights.json`/`state.json`/
+lives in a single SQLite database file (`flights.db`, `DB_PATH`). If you're
+upgrading from a version that used `flights.json`/`state.json`/
 `schedule.json`/`usage.json`/`airport_countries.json`, the bot imports them
 into `flights.db` automatically the first time it starts (reading your old
 `TELEGRAM_CHAT_ID` once, if still set, to assign the imported flights to
-that chat and auto-approve it) and renames each JSON file to
-`*.json.imported` once done.
-
-## Project layout and further reading
-
-- [`ARCHITECTURE.md`](ARCHITECTURE.md) — how the system actually works:
-  module layout, database schema, the exact conditions under which an alert
-  fires, known gaps.
-- [`docs/providers.md`](docs/providers.md) — the flight-data-provider
-  comparison mentioned above.
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — set up a dev environment, run the
-  test suite, the project's non-obvious ground rules.
-- [`CHANGELOG.md`](CHANGELOG.md) — what changed and why, phase by phase.
+that chat) and renames each JSON file to `*.json.imported` once done. You
+still need to add that chat to `ALLOWED_CHAT_IDS` yourself.

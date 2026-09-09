@@ -149,6 +149,21 @@ MIGRATIONS: list[tuple[int, str]] = [
         ALTER TABLE flights ADD COLUMN next_poll_at TEXT;
         """,
     ),
+    (
+        6,
+        """
+        -- The self-service access-request/approve/deny workflow (Phase 4)
+        -- is gone; access is now a fixed ALLOWED_CHAT_IDS allowlist (see
+        -- access.py). chats only needs to remember each chat's timezone.
+        CREATE TABLE chats_new (
+            chat_id TEXT PRIMARY KEY,
+            timezone TEXT
+        );
+        INSERT INTO chats_new (chat_id, timezone) SELECT chat_id, timezone FROM chats;
+        DROP TABLE chats;
+        ALTER TABLE chats_new RENAME TO chats;
+        """,
+    ),
 ]
 
 

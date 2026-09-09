@@ -117,6 +117,58 @@ def test_get_flight_status_returns_first_matching_record(monkeypatch):
     assert result["flight_status"] == "active"
 
 
+def test_get_flight_status_never_sends_flight_date_to_the_api(monkeypatch):
+    """Aviationstack's free tier 403s (function_access_restricted) on any
+    request that includes flight_date at all, even for today's date --
+    confirmed against a real key. Sending it would silently break every
+    dated lookup (i.e. every /status and every scheduler poll)."""
+    monkeypatch.setenv("AVIATIONSTACK_API_KEY", "fake-key")
+    calls = []
+
+    def _get(url, params, timeout):
+        calls.append(params)
+        return _FakeResponse({"data": [AVIATIONSTACK_FLIGHT_RECORD]})
+
+    monkeypatch.setattr(flight_api.requests, "get", _get)
+    flight_api.get_flight_status("RJ264", "2026-08-05")
+
+    assert "flight_date" not in calls[0]
+
+
+def test_get_flight_status_prefers_the_record_matching_the_target_date(monkeypatch):
+    """Since flight_date can't be sent to the API, disambiguation among
+    multiple returned records for the same flight_iata happens client-side
+    instead, matching on each record's own flight_date field."""
+    monkeypatch.setenv("AVIATIONSTACK_API_KEY", "fake-key")
+    wrong_day = {**AVIATIONSTACK_FLIGHT_RECORD, "flight_date": "2026-08-04"}
+    right_day = {**AVIATIONSTACK_FLIGHT_RECORD, "flight_date": "2026-08-05"}
+    monkeypatch.setattr(
+        flight_api.requests,
+        "get",
+        lambda *a, **k: _FakeResponse({"data": [wrong_day, right_day]}),
+    )
+
+    result = flight_api.get_flight_status("RJ264", "2026-08-05")
+
+    assert result["flight_date"] == "2026-08-05"
+
+
+def test_get_flight_status_falls_back_to_first_record_when_no_date_matches(
+    monkeypatch,
+):
+    monkeypatch.setenv("AVIATIONSTACK_API_KEY", "fake-key")
+    only_record = {**AVIATIONSTACK_FLIGHT_RECORD, "flight_date": "2026-08-04"}
+    monkeypatch.setattr(
+        flight_api.requests,
+        "get",
+        lambda *a, **k: _FakeResponse({"data": [only_record]}),
+    )
+
+    result = flight_api.get_flight_status("RJ264", "2026-08-05")
+
+    assert result["flight_date"] == "2026-08-04"
+
+
 def test_summarize_extracts_flat_fields():
     summary = flight_api.summarize(AVIATIONSTACK_FLIGHT_RECORD)
     assert summary == {

@@ -13,11 +13,6 @@ import timezones
 
 AVIATIONSTACK_BASE_URL = "https://api.aviationstack.com/v1/flights"
 
-# One breaker per provider (CLAUDE.md: "429 and 5xx: exponential backoff
-# with jitter, per-provider circuit breaker"). Module-level since there's
-# exactly one Aviationstack account/key for the whole process.
-_breaker = resilience.CircuitBreaker(name="aviationstack")
-
 
 class FlightLookupError(Exception):
     pass
@@ -33,8 +28,10 @@ def get_flight_status(
     """Fetch the current status for a flight number.
 
     flight_iata: e.g. "RJ264"
-    flight_date: "YYYY-MM-DD", optional (helps disambiguate recurring flight numbers)
-    Returns the first matching flight record from Aviationstack, or raises FlightLookupError.
+    flight_date: "YYYY-MM-DD", optional -- used to pick the matching record
+        client-side among whatever Aviationstack returns for flight_iata
+        (see the params comment below for why it can't be sent to the API).
+    Returns the matching flight record from Aviationstack, or raises FlightLookupError.
     """
     api_key = os.environ.get("AVIATIONSTACK_API_KEY")
     if not api_key:
@@ -46,14 +43,12 @@ def get_flight_status(
             f"Monthly API budget exhausted ({cap} requests/month)."
         )
 
-    try:
-        _breaker.before_call()
-    except resilience.CircuitOpenError as e:
-        raise FlightLookupError(str(e)) from e
-
+    # Aviationstack's free tier rejects the flight_date query param outright
+    # (403 "function_access_restricted", confirmed even for today's date --
+    # it's a paid-plan-only feature, not a future/historical-date
+    # restriction). Ask for flight_iata alone; if a target date was given,
+    # disambiguate client-side below instead.
     params = {"access_key": api_key, "flight_iata": flight_iata}
-    if flight_date:
-        params["flight_date"] = flight_date
 
     def _attempt() -> requests.Response:
         # Each real attempt is a real request against Aviationstack's own
@@ -70,13 +65,7 @@ def get_flight_status(
             ),
         )
     except requests.RequestException as e:
-        _breaker.record_failure()
         raise FlightLookupError(f"Network error contacting Aviationstack: {e}") from e
-
-    if resp.status_code in resilience.DEFAULT_RETRYABLE_STATUSES:
-        _breaker.record_failure()
-    else:
-        _breaker.record_success()
 
     try:
         resp.raise_for_status()
@@ -101,6 +90,13 @@ def get_flight_status(
             + (f" on {flight_date}" if flight_date else "")
         )
 
+    if flight_date:
+        for record in data:
+            if record.get("flight_date") == flight_date:
+                return record
+    # No target date, or none of the returned records match it: this
+    # endpoint is inherently real-time, so the first result is whichever
+    # occurrence Aviationstack currently considers live for this flight_iata.
     return data[0]
 
 

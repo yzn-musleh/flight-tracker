@@ -9,6 +9,13 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
+
+# Must run before importing any local module: access.py/storage/__init__.py/
+# singleton.py all read their env vars (ALLOWED_CHAT_IDS, DB_PATH, LOCK_PATH)
+# as module-level constants at import time, so .env has to be loaded into
+# the environment first or they'd silently fall back to defaults/empty.
+load_dotenv()
+
 from telegram import BotCommand, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
@@ -17,7 +24,6 @@ import airports
 import change_detection
 import flight_api
 import logging_config
-import providers
 import resilience
 import scheduler
 import singleton
@@ -25,21 +31,22 @@ import storage
 import storage.importer
 import timezones
 
-load_dotenv()
-
 logging_config.configure(level=logging.INFO)
 log = logging.getLogger("flight_tracker")
 
 SCHEDULER_TICK_MINUTES = int(os.environ.get("SCHEDULER_TICK_MINUTES", "15"))
 MONTHLY_REQUEST_CAP = int(os.environ.get("MONTHLY_REQUEST_CAP", "100"))
 REQUEST_SAFETY_MARGIN = int(os.environ.get("REQUEST_SAFETY_MARGIN", "5"))
-provider = providers.get_provider()
+
+
+def get_flight(flight_iata: str, date: str | None = None) -> dict[str, Any]:
+    return flight_api.summarize(flight_api.get_flight_status(flight_iata, date))
 
 
 async def _require_access(update: Update) -> bool:
     """Gate for every data-touching command. chat_id is the tenant boundary
-    (CLAUDE.md invariant #5) -- an unapproved chat gets a message telling it
-    how to ask, not silence and not a peek at anyone's data."""
+    (CLAUDE.md invariant #5) -- a chat not on the allowlist gets told to ask
+    the operator, not silence and not a peek at anyone's data."""
     # CommandHandler only ever calls a handler for a Message update, which
     # always has .message and .effective_chat set -- true by construction,
     # not just hoped for, so asserting it (rather than silently handling a
@@ -49,13 +56,10 @@ async def _require_access(update: Update) -> bool:
     chat_id = str(update.effective_chat.id)
     if access.is_approved(chat_id):
         return True
-    if access.is_denied(chat_id):
-        await update.message.reply_text("Your access request was denied.")
-    else:
-        await update.message.reply_text(
-            "This chat isn't approved to use this bot yet. "
-            "Send /request_access to ask the operator."
-        )
+    await update.message.reply_text(
+        "This chat isn't approved to use this bot. "
+        "Ask the operator to add your chat ID to ALLOWED_CHAT_IDS."
+    )
     return False
 
 
@@ -84,8 +88,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/remove <flight_iata> - stop tracking a flight\n"
         "/budget - show remaining monthly API requests\n"
         "/timezone <IANA name> - set the timezone flight times are shown in for this chat\n"
-        "/forget - delete all tracked flights and settings for this chat\n"
-        "/request_access - ask the operator to approve this chat\n\n"
+        "/forget - delete all tracked flights and settings for this chat\n\n"
         f"Your chat ID is {update.effective_chat.id}."
     )
 
@@ -160,7 +163,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     date = tracked["date"] if tracked else None
     name = tracked["name"] if tracked else flight_iata
     try:
-        summary = provider.get_flight(flight_iata, date)
+        summary = get_flight(flight_iata, date)
         subscriber_tz = storage.get_chat_timezone(chat_id)
         await update.message.reply_text(
             flight_api.format_message(
@@ -214,7 +217,7 @@ async def add_flight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     flight_iata = flight_iata.upper()
     dep_country = arr_country = "Unknown"
     try:
-        summary = provider.get_flight(flight_iata, date)
+        summary = get_flight(flight_iata, date)
         dep_country = airports.get_country(summary.get("dep_iata"))
         arr_country = airports.get_country(summary.get("arr_iata"))
     except flight_api.FlightLookupError:
@@ -288,86 +291,6 @@ async def timezone_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(f"Timezone set to {tz_name}.")
 
 
-async def request_access_cmd(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    assert update.message is not None
-    assert update.effective_chat is not None
-    chat_id = str(update.effective_chat.id)
-    result = access.request_access(chat_id)
-    if result == "approved":
-        await update.message.reply_text("This chat is already approved.")
-        return
-    if result == "denied":
-        await update.message.reply_text("Your access request was previously denied.")
-        return
-    await update.message.reply_text(
-        "Access request sent. You'll be notified once an operator approves it."
-    )
-    for admin_chat_id in access.ALLOWED_CHAT_IDS:
-        try:
-            # A typed nested function, not a lambda: binds admin_chat_id via
-            # a default argument (the standard fix for a closure inside a
-            # loop -- ruff's B023 flags the bare-lambda version precisely
-            # because it'd break if this were ever changed to fire all sends
-            # concurrently instead of one at a time), and unlike a lambda its
-            # parameter can carry an explicit annotation, which is what lets
-            # mypy infer send_with_retry's generic return type here.
-            async def _notify(admin_chat_id: str = admin_chat_id) -> None:
-                await context.bot.send_message(
-                    chat_id=admin_chat_id,
-                    text=(
-                        f"Access request from chat {chat_id}.\n"
-                        f"Approve with /approve {chat_id} or deny with /deny {chat_id}."
-                    ),
-                )
-
-            await resilience.send_with_retry(_notify)
-        except Exception as e:  # noqa: BLE001 -- best-effort notify, one admin's failure shouldn't block the rest
-            log.warning(
-                "Couldn't notify admin chat %s of access request: %s", admin_chat_id, e
-            )
-
-
-async def approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    assert update.message is not None
-    assert update.effective_chat is not None
-    chat_id = str(update.effective_chat.id)
-    if not access.is_admin(chat_id):
-        await update.message.reply_text("Only an operator can do that.")
-        return
-    if not context.args:
-        await update.message.reply_text("Usage: /approve <chat_id>")
-        return
-    target = context.args[0]
-    storage.set_chat_access_status(target, "approved", decided_by=chat_id)
-    await update.message.reply_text(f"Approved {target}.")
-    try:
-        await resilience.send_with_retry(
-            lambda: context.bot.send_message(
-                chat_id=target,
-                text="Your access request was approved. You can now use the bot.",
-            )
-        )
-    except Exception as e:  # noqa: BLE001 -- approval already recorded; a failed notify shouldn't undo it
-        log.warning("Couldn't notify chat %s of approval: %s", target, e)
-
-
-async def deny(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    assert update.message is not None
-    assert update.effective_chat is not None
-    chat_id = str(update.effective_chat.id)
-    if not access.is_admin(chat_id):
-        await update.message.reply_text("Only an operator can do that.")
-        return
-    if not context.args:
-        await update.message.reply_text("Usage: /deny <chat_id>")
-        return
-    target = context.args[0]
-    storage.set_chat_access_status(target, "denied", decided_by=chat_id)
-    await update.message.reply_text(f"Denied {target}.")
-
-
 async def check_all_flights(context: ContextTypes.DEFAULT_TYPE) -> None:
     # A correlation id per poll cycle (CLAUDE.md) -- every log line from this
     # invocation carries it, so a support request ("what happened around
@@ -383,8 +306,9 @@ async def check_all_flights(context: ContextTypes.DEFAULT_TYPE) -> None:
             storage.mark_usage_warned()
             for admin_chat_id in access.ALLOWED_CHAT_IDS:
                 try:
-                    # See the comment in request_access_cmd on why this is a
-                    # typed nested function, not a lambda.
+                    # A typed nested function, not a lambda: binds admin_chat_id
+                    # via a default argument (the standard fix for a closure
+                    # inside a loop -- ruff's B023 flags the bare-lambda version).
                     async def _notify(admin_chat_id: str = admin_chat_id) -> None:
                         await context.bot.send_message(
                             chat_id=admin_chat_id,
@@ -414,7 +338,7 @@ async def check_all_flights(context: ContextTypes.DEFAULT_TYPE) -> None:
             continue
 
         try:
-            summary = provider.get_flight(flight_iata, flight_date)
+            summary = get_flight(flight_iata, flight_date)
         except flight_api.BudgetExhaustedError as e:
             cycle_log.warning(
                 "Monthly budget exhausted mid-run, stopping periodic checks: %s", e
@@ -502,8 +426,8 @@ async def check_all_flights(context: ContextTypes.DEFAULT_TYPE) -> None:
                     subscriber_tz=subscriber_tz,
                 )
 
-                # See the comment in request_access_cmd on why this is a
-                # typed nested function, not a lambda.
+                # A typed nested function, not a lambda -- see the comment
+                # on _notify above.
                 async def _send(
                     chat_id: str = sub["chat_id"], text: str = text
                 ) -> None:
@@ -526,38 +450,14 @@ async def _post_init(app: Application[Any, Any, Any, Any, Any, Any]) -> None:
             BotCommand("budget", "Show remaining monthly API requests"),
             BotCommand("timezone", "Set this chat's display timezone"),
             BotCommand("forget", "Delete all data for this chat"),
-            BotCommand("request_access", "Ask the operator to approve this chat"),
         ]
     )
-
-
-def _webhook_config() -> dict[str, Any] | None:
-    """Returns run_webhook() kwargs if WEBHOOK_MODE is enabled, else None
-    (meaning: use run_polling()). Kept separate from main() so the config
-    decision is testable without actually starting a server. Fits a
-    reverse-proxy/tunnel setup that terminates TLS externally (e.g.
-    Cloudflare Tunnel) and forwards plain HTTP to this process -- the bot
-    itself never needs a certificate."""
-    if os.environ.get("WEBHOOK_MODE", "false").lower() not in ("1", "true", "yes"):
-        return None
-    webhook_url = os.environ.get("WEBHOOK_URL")
-    if not webhook_url:
-        raise SystemExit("WEBHOOK_MODE is enabled but WEBHOOK_URL is not set.")
-    path = os.environ.get("WEBHOOK_PATH", "/telegram-webhook")
-    return {
-        "listen": os.environ.get("WEBHOOK_LISTEN", "0.0.0.0"),
-        "port": int(os.environ.get("WEBHOOK_PORT", "8443")),
-        "url_path": path,
-        "webhook_url": f"{webhook_url.rstrip('/')}/{path.lstrip('/')}",
-    }
 
 
 def main() -> None:
     token = os.environ.get("TELEGRAM_BOT_TOKEN")
     if not token:
         raise SystemExit("Set TELEGRAM_BOT_TOKEN in your .env file first.")
-
-    webhook_kwargs = _webhook_config()
 
     try:
         singleton.acquire()
@@ -577,9 +477,6 @@ def main() -> None:
         app.add_handler(CommandHandler("budget", budget))
         app.add_handler(CommandHandler("timezone", timezone_cmd))
         app.add_handler(CommandHandler("forget", forget))
-        app.add_handler(CommandHandler("request_access", request_access_cmd))
-        app.add_handler(CommandHandler("approve", approve))
-        app.add_handler(CommandHandler("deny", deny))
 
         if app.job_queue:
             app.job_queue.run_repeating(
@@ -590,16 +487,11 @@ def main() -> None:
             "Bot starting, scheduler tick every %s minutes (flights only polled inside their active window).",
             SCHEDULER_TICK_MINUTES,
         )
-        # Both run_polling() and run_webhook() install SIGINT/SIGTERM/SIGABRT
-        # handlers by default on non-Windows platforms (verified against the
-        # installed python-telegram-bot's own docstring) and drain in-flight
-        # work before exiting -- graceful shutdown on the actual deployment
-        # target (Docker/Linux, Phase 6) needs nothing further here.
-        if webhook_kwargs:
-            log.info("Webhook mode: listening on %s", webhook_kwargs)
-            app.run_webhook(**webhook_kwargs)
-        else:
-            app.run_polling()
+        # run_polling() installs SIGINT/SIGTERM/SIGABRT handlers by default on
+        # non-Windows platforms and drains in-flight work before exiting --
+        # graceful shutdown on the actual deployment target (Docker/Linux)
+        # needs nothing further here.
+        app.run_polling()
     finally:
         singleton.release()
 

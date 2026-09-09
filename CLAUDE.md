@@ -2,10 +2,13 @@
 
 ## What this project is
 
-A self-hostable Telegram bot that tracks flights and notifies a chat when status,
-delay, gate, or terminal changes. Currently a personal single-user script backed by
-JSON files and the Aviationstack free tier. The goal is a publishable open-source
-project that a stranger can clone, configure, and run reliably for months.
+A self-hostable Telegram bot for a family tracking each other's flights: it
+notifies a chat when status, delay, gate, or terminal changes. A handful of
+allowlisted chats, one flight-data provider (Aviationstack, free tier),
+SQLite storage, long polling. Not a platform — keep it that size. Resist
+adding abstractions (provider protocols, plugin systems, push/webhook modes)
+for hypothetical future needs; add them only when a second real need
+actually shows up.
 
 ## Non-negotiable invariants
 
@@ -15,46 +18,53 @@ project that a stranger can clone, configure, and run reliably for months.
 2. **Never alert on missing data.** A field going `value -> null` because the
    provider blipped is not a change. Only `non-null -> different non-null`, plus an
    explicit whitelist of status transitions, produce a message.
-3. **Never exceed the provider's quota.** The quota guard is a hard gate in the
-   provider layer, not a courtesy check in the scheduler. When exhausted, the bot
+3. **Never exceed the provider's quota.** The quota guard is a hard gate in
+   `flight_api.py`, not a courtesy check in the scheduler. When exhausted, the bot
    says so plainly instead of going silently dark.
 4. **All timestamps are stored in UTC.** Local times are a rendering concern only.
 5. **`chat_id` is the tenant boundary.** No query, list, or alert may ever cross
-   from one chat's data to another's. There is no global "the chat" any more.
+   from one chat's data to another's. There is no global "the chat".
 6. **Secrets never enter the repo, logs, or error messages.** Tokens are redacted in
    every log path including exception tracebacks.
 
-## Target architecture
+## Actual architecture
+
+Flat modules, not packages-within-packages — this is a single small bot, not
+a platform:
 
 ```
-telegram/        command handlers, formatting, keyboards (no business logic)
-core/            domain: Flight, Subscription, ChangeEvent, change detection
-providers/       FlightProvider protocol + aviationstack/, aerodatabox/, fake/
-scheduler/       poll loop, next_poll_at computation, backoff, circuit breaker
-storage/         SQLite (WAL), migrations, repositories
-static/          bundled airports dataset (IATA -> country, tz, name)
-config.py        pydantic-settings, validated at boot, fail fast
+bot.py              command handlers, formatting, scheduler tick, entry point
+flight_api.py       Aviationstack HTTP client, quota gate, message formatting
+change_detection.py which field changes are alert-worthy
+scheduler.py        active-window + tiered polling-interval decisions
+resilience.py       retry-with-backoff (HTTP), Telegram RetryAfter handling
+access.py           fixed ALLOWED_CHAT_IDS allowlist check
+airports.py         offline IATA -> country/timezone lookup
+timezones.py        dual (airport + subscriber) time rendering
+singleton.py        PID-file single-instance lock
+storage/            SQLite (WAL), versioned migrations, repository functions
+static/             bundled airports dataset (IATA -> country, tz, name)
 ```
 
 - **Storage is SQLite**, not JSON files. WAL mode, one file, versioned schema
-  migrations. The five JSON files collapse into tables; ship a one-time importer so
-  existing users don't lose their data.
-- **`FlightProvider` is a Protocol**, not an inheritance tree. It exposes
-  `get_flight(flight_iata, date) -> FlightSnapshot | None`, a declared
-  `quota: QuotaPolicy`, and `supports_push: bool`. Adding a provider means adding one
-  file and one config value — no changes anywhere else.
-- **Push is a first-class mode.** If a provider supports subscription webhooks, the
-  poll scheduler is bypassed entirely for its flights. Design the interface so this
-  slots in without restructuring; do not hardcode the polling model into the domain.
+  migrations in `storage/migrations.py`.
+- **One flight-data provider, called directly.** `flight_api.py` talks to
+  Aviationstack; `bot.py` calls it directly. Don't reintroduce a
+  provider-abstraction layer (Protocol, registry, `FLIGHT_PROVIDER` env var)
+  unless a second provider is actually being wired in — a one-provider
+  project doesn't need an interface for the provider it doesn't have yet.
+- **Access is a fixed allowlist** (`ALLOWED_CHAT_IDS`), not a self-service
+  approval workflow. This is a family bot with a handful of known chats, not
+  a service strangers sign up for.
+- **Long polling only.** No webhook mode. It needs no inbound network access
+  and no reverse proxy/TLS setup — the simpler option for a family bot.
 - **Airport metadata is bundled offline** (OurAirports/OpenFlights CSV, checked into
-  `static/`). Country and timezone resolution must cost zero API calls. This removes
-  the `airport_countries.json` runtime lookups entirely.
+  `static/`). Country and timezone resolution must cost zero API calls.
 
 ## Data model notes
 
 - A flight is identified by `(flight_iata, scheduled_departure_date_utc)`. A bare
   flight code is ambiguous — two family members can be on `RJ264` on different days.
-  Commands that take a bare code must disambiguate via inline keyboard, never guess.
 - Many subscriptions can point at one flight. Poll the flight once; fan out the
   notification to every subscribed chat.
 - Keep an `api_usage` table (provider, timestamp, endpoint, http_status, counted).
@@ -63,10 +73,12 @@ config.py        pydantic-settings, validated at boot, fail fast
 
 ## Failure semantics
 
-- 429 and 5xx: exponential backoff with jitter, per-provider circuit breaker.
+- 429 and 5xx: exponential backoff with jitter (`resilience.retry_with_backoff`).
+  No circuit breaker — a single-provider, low-request-volume bot doesn't need
+  one; backoff alone keeps it well-behaved against a flaky API.
 - 4xx other than 429: do not retry, log once, mark the flight as needing attention.
-- Provider returns nothing for a flight repeatedly: after N attempts, tell the
-  subscriber the flight can't be found rather than failing silently.
+- Provider returns nothing for a flight repeatedly: the lookup error is logged and
+  that flight is skipped for the poll cycle rather than blocking the others.
 - Diverted, cancelled, and redirected flights are terminal states with their own
   message copy. Delays that push departure across midnight must not create a
   duplicate flight row under the next day's key.
@@ -83,8 +95,8 @@ config.py        pydantic-settings, validated at boot, fail fast
 
 ## Testing
 
-- `pytest` + `pytest-asyncio`. A `FakeProvider` driven by recorded JSON fixtures is
-  the backbone; no test may hit a real API.
+- `pytest` + `pytest-asyncio`. Tests stub `flight_api.get_flight_status` /
+  `requests.get` directly; no test may hit a real API.
 - `time-machine` (or `freezegun`) to test the scheduler tiers, quota window rollover,
   and midnight boundaries.
 - Required coverage of behavior, not lines: change detection, alert dedupe across a
@@ -93,12 +105,14 @@ config.py        pydantic-settings, validated at boot, fail fast
 
 ## Rules for you, Claude
 
-- **Plan before editing.** For any phase, produce the plan and wait for approval.
-- **One phase per branch, small commits, tests in the same commit as the code.**
-- Do not scaffold a new project or rewrite everything at once. This is an incremental
-  hardening of existing working code — preserve behavior that already works, and write
-  a characterization test before changing any logic you don't fully understand.
+- **Plan before a non-trivial change.** Produce the plan and wait for approval.
+- Small commits, tests in the same commit as the code.
+- Preserve behavior that already works. Write a characterization test before
+  changing any logic you don't fully understand.
 - Do not invent API response shapes. Read the provider's live docs or a recorded
   fixture; if neither is available, stop and ask.
 - Do not add dependencies without saying why in the commit message. Prefer stdlib.
-- When you finish a phase, update `ARCHITECTURE.md` and `CHANGELOG.md`.
+- Keep this a small, flat, single-provider personal project. When a request would
+  reintroduce something removed for that reason (a provider abstraction, an
+  access-approval workflow, webhook mode, a circuit breaker), point that out
+  before doing it.

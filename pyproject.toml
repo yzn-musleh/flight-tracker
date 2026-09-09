@@ -15,10 +15,9 @@ dependencies = [
     "python-dotenv==1.0.1",
 ]
 
-# Exact versions match what this project was developed and tested against
-# (see PROGRESS.md); requirements.txt is kept as-is alongside this for
-# Docker's build step (Phase 6) to install from directly without needing
-# pip's full pyproject/build-backend resolution in the image.
+# requirements.txt is kept as-is alongside this for Docker's build step to
+# install from directly without needing pip's full pyproject/build-backend
+# resolution in the image.
 [project.optional-dependencies]
 dev = [
     "pytest==9.1.1",
@@ -45,7 +44,7 @@ py-modules = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["storage*", "providers*"]
+include = ["storage*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -62,9 +61,8 @@ target-version = "py312"
 [tool.mypy]
 python_version = "3.12"
 strict = true
-# Genuinely strict-clean as of Phase 7 (see PROGRESS.md) -- every production
-# module passes `mypy --strict` with no per-file ignores and no blanket
-# --ignore-missing-imports (types-requests, a dev dependency, covers the one
-# third-party package that needed stubs). Test files aren't included in CI's
-# mypy invocation or here; only bot.py and the plain modules/packages it
+# Every production module passes `mypy --strict` with no per-file ignores
+# and no blanket --ignore-missing-imports (types-requests, a dev dependency,
+# covers the one third-party package that needed stubs). Test files aren't
+# included in this invocation; only bot.py and the plain modules/packages it
 # imports are checked.

@@ -39,7 +39,7 @@ def test_migrations_are_idempotent_across_connections():
         pass
     with storage._db() as conn:
         version = conn.execute("SELECT version FROM schema_version").fetchone()[0]
-    assert version == 5
+    assert version == 6
 
 
 def test_wal_mode_is_enabled():

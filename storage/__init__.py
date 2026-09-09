@@ -430,47 +430,7 @@ def mark_usage_warned() -> None:
         )
 
 
-# --- chats (per-chat access status + settings) ------------------------------
-
-
-def request_chat_access(chat_id: str) -> None:
-    """Records a pending access request, if this chat hasn't already been
-    decided (or already has a pending request) -- idempotent, so a chat
-    spamming /request_access doesn't reset an existing approval/denial."""
-    with _db() as conn:
-        conn.execute(
-            "INSERT INTO chats (chat_id, access_status, requested_at) "
-            "VALUES (?, 'pending', ?) "
-            "ON CONFLICT(chat_id) DO NOTHING",
-            (chat_id, datetime.now(UTC).isoformat()),
-        )
-
-
-def get_chat_access_status(chat_id: str) -> str | None:
-    """None means this chat has never requested access at all (distinct from
-    'pending', which means it has and is waiting)."""
-    with _db() as conn:
-        row = conn.execute(
-            "SELECT access_status FROM chats WHERE chat_id = ?", (chat_id,)
-        ).fetchone()
-    return row["access_status"] if row else None
-
-
-def set_chat_access_status(
-    chat_id: str, status: str, decided_by: str | None = None
-) -> None:
-    if status not in ("pending", "approved", "denied"):
-        raise ValueError(f"Invalid access status: {status!r}")
-    now = datetime.now(UTC).isoformat()
-    with _db() as conn:
-        conn.execute(
-            "INSERT INTO chats (chat_id, access_status, requested_at, decided_at, decided_by) "
-            "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(chat_id) DO UPDATE SET "
-            "access_status = excluded.access_status, decided_at = excluded.decided_at, "
-            "decided_by = excluded.decided_by",
-            (chat_id, status, now, now, decided_by),
-        )
+# --- chats (per-chat settings) -----------------------------------------------
 
 
 def get_chat_timezone(chat_id: str) -> str | None:
@@ -482,11 +442,9 @@ def get_chat_timezone(chat_id: str) -> str | None:
 
 
 def set_chat_timezone(chat_id: str, tz_name: str) -> None:
-    now = datetime.now(UTC).isoformat()
     with _db() as conn:
         conn.execute(
-            "INSERT INTO chats (chat_id, access_status, requested_at, timezone) "
-            "VALUES (?, 'pending', ?, ?) "
+            "INSERT INTO chats (chat_id, timezone) VALUES (?, ?) "
             "ON CONFLICT(chat_id) DO UPDATE SET timezone = excluded.timezone",
-            (chat_id, now, tz_name),
+            (chat_id, tz_name),
         )

@@ -1,8 +1,6 @@
-"""New in Phase 5: characterizes resilience.py's retry/backoff, circuit
-breaker, and Telegram RetryAfter handling in isolation -- no real sleeping,
-no real network, no real Telegram client."""
-
-from datetime import UTC, datetime, timedelta
+"""Characterizes resilience.py's retry/backoff and Telegram RetryAfter
+handling in isolation -- no real sleeping, no real network, no real
+Telegram client."""
 
 import pytest
 
@@ -88,55 +86,6 @@ def test_backoff_delay_grows_exponentially():
     )
 
     assert calls == [1.0, 2.0, 4.0]
-
-
-# --- CircuitBreaker -----------------------------------------------------------
-
-
-def test_circuit_stays_closed_below_failure_threshold():
-    breaker = resilience.CircuitBreaker(name="test", failure_threshold=3)
-    breaker.record_failure()
-    breaker.record_failure()
-    breaker.before_call()  # must not raise
-    assert breaker.is_open is False
-
-
-def test_circuit_opens_at_failure_threshold_and_refuses_calls():
-    breaker = resilience.CircuitBreaker(
-        name="test", failure_threshold=2, cooldown_seconds=60
-    )
-    breaker.record_failure()
-    breaker.record_failure()
-
-    assert breaker.is_open is True
-    with pytest.raises(resilience.CircuitOpenError):
-        breaker.before_call()
-
-
-def test_circuit_half_opens_after_cooldown():
-    breaker = resilience.CircuitBreaker(
-        name="test", failure_threshold=1, cooldown_seconds=30
-    )
-    now = datetime(2026, 8, 5, tzinfo=UTC)
-    breaker.record_failure(now=now)
-
-    with pytest.raises(resilience.CircuitOpenError):
-        breaker.before_call(now=now + timedelta(seconds=10))
-
-    breaker.before_call(
-        now=now + timedelta(seconds=31)
-    )  # cooldown elapsed, must not raise
-
-
-def test_circuit_closes_again_on_success():
-    breaker = resilience.CircuitBreaker(name="test", failure_threshold=1)
-    breaker.record_failure()
-    assert breaker.is_open is True
-
-    breaker.record_success()
-
-    assert breaker.is_open is False
-    breaker.before_call()  # must not raise
 
 
 # --- send_with_retry ----------------------------------------------------------

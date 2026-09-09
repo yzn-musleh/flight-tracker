@@ -84,9 +84,6 @@ def test_import_migrates_flights_state_schedule_usage_airports(tmp_path, monkeyp
     # resolves country/timezone from the bundled static/airports.csv instead)
     # but the file itself is still renamed like the others.
     assert os.path.exists(tmp_path / "airport_countries.json.imported")
-    # The pre-Phase-4 operator chat is auto-approved so upgrading doesn't
-    # lock them out of their own already-tracked flights.
-    assert storage.get_chat_access_status("999") == "approved"
 
 
 def test_import_renames_source_files_so_a_second_run_is_a_no_op(tmp_path):

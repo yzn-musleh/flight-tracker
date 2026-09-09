@@ -1,9 +1,7 @@
-"""Docker HEALTHCHECK script (Phase 6).
+"""Docker HEALTHCHECK script.
 
 Passes iff this container's bot process is alive and holds its own
-single-instance lock (singleton.py) -- works the same way whether the bot
-is running in long-polling or webhook mode, so there's one healthcheck
-regardless of WEBHOOK_MODE rather than two conditional ones.
+single-instance lock (singleton.py).
 """
 
 import sys

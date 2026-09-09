@@ -16,6 +16,7 @@ reason that links to FINDINGS.md.
 
 import pytest
 
+import access
 import storage
 
 XFAIL_SUPERSEDED = {
@@ -104,14 +105,15 @@ DEFAULT_TEST_CHAT_ID = "12345"  # matches tests/fakes.py's FakeUpdate default
 
 
 @pytest.fixture(autouse=True)
-def approved_default_chat(isolated_storage):
-    """Phase 4 gates every data-touching command on chat access approval.
-    Pre-approving the default FakeUpdate chat_id here means handler tests
-    written before Phase 4 (which have no idea access control exists) keep
-    exercising real handler behavior instead of being turned away at the
-    gate -- without editing any of those test files. Tests that need a
-    *different*, unapproved chat_id do so explicitly and aren't affected."""
-    storage.set_chat_access_status(DEFAULT_TEST_CHAT_ID, "approved")
+def approved_default_chat(isolated_storage, monkeypatch):
+    """Every data-touching command is gated on access.is_approved(). Putting
+    the default FakeUpdate chat_id on the allowlist here means handler tests
+    with no interest in access control exercise real handler behavior
+    instead of being turned away at the gate -- without editing any of those
+    test files. Tests that need a *different*, unapproved chat_id do so
+    explicitly (monkeypatching access.ALLOWED_CHAT_IDS themselves) and
+    aren't affected."""
+    monkeypatch.setattr(access, "ALLOWED_CHAT_IDS", frozenset({DEFAULT_TEST_CHAT_ID}))
 
 
 @pytest.fixture(autouse=True)

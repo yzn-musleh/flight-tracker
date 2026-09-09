@@ -1,10 +1,10 @@
-"""Backoff/retry and a per-provider circuit breaker for flaky HTTP calls,
-plus a helper for Telegram's own rate-limit signal (RetryAfter).
+"""Backoff/retry for flaky HTTP calls, plus a helper for Telegram's own
+rate-limit signal (RetryAfter).
 
 CLAUDE.md's failure semantics: "429 and 5xx: exponential backoff with
-jitter, per-provider circuit breaker." "4xx other than 429: do not retry."
-This module implements the mechanism; flight_api.py decides which statuses
-are retryable for Aviationstack specifically.
+jitter." "4xx other than 429: do not retry." This module implements the
+mechanism; flight_api.py decides which statuses are retryable for
+Aviationstack specifically.
 """
 
 import asyncio
@@ -12,72 +12,13 @@ import logging
 import random
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 
 from telegram.error import RetryAfter
 
 log = logging.getLogger("flight_tracker.resilience")
 
 DEFAULT_RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
-
-
-class CircuitOpenError(Exception):
-    """Raised when a circuit breaker refuses to attempt a call at all."""
-
-
-@dataclass
-class CircuitBreaker:
-    """A simple closed/open/half-open breaker, one instance per provider.
-
-    Closed (normal): calls proceed; failures are counted.
-    Open: calls are refused immediately (CircuitOpenError) once
-    `failure_threshold` consecutive failures have happened, for
-    `cooldown_seconds`.
-    Half-open: after the cooldown, the next call is allowed through as a
-    trial; success closes the breaker again, failure re-opens it.
-    """
-
-    name: str
-    failure_threshold: int = 5
-    cooldown_seconds: float = 60.0
-    _consecutive_failures: int = field(default=0, init=False, repr=False)
-    _opened_at: datetime | None = field(default=None, init=False, repr=False)
-
-    def before_call(self, now: datetime | None = None) -> None:
-        if self._opened_at is None:
-            return
-        now = now or datetime.now(UTC)
-        if now - self._opened_at < timedelta(seconds=self.cooldown_seconds):
-            raise CircuitOpenError(
-                f"Circuit breaker '{self.name}' is open "
-                f"(retry after {self.cooldown_seconds}s cooldown)"
-            )
-        log.info(
-            "Circuit breaker %s entering half-open trial after cooldown", self.name
-        )
-        # Stays "open" (opened_at set) until record_success/record_failure
-        # resolves the trial, so a second caller mid-trial is still refused.
-
-    def record_success(self) -> None:
-        if self._consecutive_failures or self._opened_at:
-            log.info("Circuit breaker %s closed (call succeeded)", self.name)
-        self._consecutive_failures = 0
-        self._opened_at = None
-
-    def record_failure(self, now: datetime | None = None) -> None:
-        self._consecutive_failures += 1
-        if self._consecutive_failures >= self.failure_threshold:
-            self._opened_at = now or datetime.now(UTC)
-            log.warning(
-                "Circuit breaker %s opened after %d consecutive failures",
-                self.name,
-                self._consecutive_failures,
-            )
-
-    @property
-    def is_open(self) -> bool:
-        return self._opened_at is not None
 
 
 def retry_with_backoff[T](
@@ -135,11 +76,18 @@ async def send_with_retry[R](
         except RetryAfter as e:
             if attempt == max_attempts - 1:
                 raise
+            # RetryAfter.retry_after is int | timedelta (python-telegram-bot
+            # 22+); normalize to seconds for the injectable float-based sleep.
+            retry_after = (
+                e.retry_after.total_seconds()
+                if isinstance(e.retry_after, timedelta)
+                else float(e.retry_after)
+            )
             log.warning(
                 "Telegram rate-limited us, retrying after %.1fs (attempt %d/%d)",
-                e.retry_after,
+                retry_after,
                 attempt + 1,
                 max_attempts,
             )
-            await sleep(e.retry_after)
+            await sleep(retry_after)
     raise AssertionError("unreachable")  # pragma: no cover
